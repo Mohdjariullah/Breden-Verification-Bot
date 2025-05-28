@@ -98,13 +98,19 @@ class BredenBot(commands.Bot):
         for command in self.tree.get_commands():
             print(f"  /{command.name} - {command.description}")
         
-        await self.change_presence(
-            status=discord.Status.online,
-            activity=discord.Activity(
-                type=discord.ActivityType.watching,
-                name="for new members to verify"
+        # Set custom status - DND with "Watching Gates of Server"
+        try:
+            await self.change_presence(
+                status=discord.Status.dnd,
+                activity=discord.Activity(
+                    type=discord.ActivityType.watching,
+                    name="Gates of Server"
+                )
             )
-        )
+            print("✅ Status set: DND - Watching Gates of Server")
+        except Exception as e:
+            print(f"❌ Failed to set status: {e}")
+        
         logging.info(f"Bot started successfully as {self.user}")
 
     async def on_command_error(self, ctx, error):

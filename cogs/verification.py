@@ -106,7 +106,7 @@ class VerificationView(View):
             ),
             color=discord.Color.green()
         )
-        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1335112843476860968/1366511856994222201/funded.jpg")
+        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1370122090631532655/1377305621044531290/1228868654c7a053f79777f7b16ff623.png")
         embed.add_field(name="📅 Booking Status", value="Pending", inline=True)
         embed.add_field(name="⏱️ Expires", value=f"<t:{exp_ts}:f>", inline=True)
         embed.add_field(name="🎯 Subscription", value="\n".join(subscription_info), inline=False)

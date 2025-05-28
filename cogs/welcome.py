@@ -49,7 +49,7 @@ class Welcome(commands.Cog):
                 color=0x5865F2
             )
             embed.set_footer(text="Join our community today!")
-            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1335112843476860968/1366511856994222201/funded.jpg")
+            embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1370122090631532655/1377305621044531290/1228868654c7a053f79777f7b16ff623.png")
             
             message = await welcome_channel.send(embed=embed, view=VerificationView())
             logging.info(f"Created new welcome message: {message.jump_url}")
@@ -140,7 +140,7 @@ class Welcome(commands.Cog):
                     color=0x5865F2
                 )
                 embed.set_footer(text="Join our community today!")
-                embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1335112843476860968/1366511856994222201/funded.jpg")
+                embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1370122090631532655/1377305621044531290/1228868654c7a053f79777f7b16ff623.png")
                 
                 message = await welcome_channel.send(embed=embed, view=VerificationView())
                 
