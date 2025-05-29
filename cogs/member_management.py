@@ -16,18 +16,35 @@ class MemberManagement(commands.Cog):
         self.users_awaiting_verification: Set[int] = set()
         # Track users currently being verified to prevent race conditions
         self.users_being_verified: Set[int] = set()
+        print("🔧 MemberManagement cog initialized")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Called when the cog is ready"""
+        print("🔧 MemberManagement cog is ready!")
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
         """Handle new member joins - check for subscription roles and remove them for verification"""
         try:
-            print(f"🔍 DEBUG: Member {member.name} joined")
+            print(f"\n🔍 DEBUG: Member {member.name} joined server {member.guild.name}")
             print(f"🔍 DEBUG: Member roles: {[role.name for role in member.roles]}")
             print(f"🔍 DEBUG: Member role IDs: {[role.id for role in member.roles]}")
             
+            # Check environment variables first
+            launchpad_role_env = os.getenv('LAUNCHPAD_ROLE_ID')
+            member_role_env = os.getenv('MEMBER_ROLE_ID')
+            
+            print(f"🔍 DEBUG: LAUNCHPAD_ROLE_ID from env: {launchpad_role_env}")
+            print(f"🔍 DEBUG: MEMBER_ROLE_ID from env: {member_role_env}")
+            
+            if not launchpad_role_env or not member_role_env:
+                print("❌ ERROR: Role IDs not set in environment variables!")
+                return
+            
             # Define the subscription roles that need verification
-            launchpad_role_id = int(os.getenv('LAUNCHPAD_ROLE_ID'))
-            member_role_id = int(os.getenv('MEMBER_ROLE_ID'))
+            launchpad_role_id = int(launchpad_role_env)
+            member_role_id = int(member_role_env)
             
             print(f"🔍 DEBUG: Looking for Launchpad role ID: {launchpad_role_id}")
             print(f"🔍 DEBUG: Looking for Member role ID: {member_role_id}")
@@ -92,6 +109,8 @@ class MemberManagement(commands.Cog):
         except Exception as e:
             print(f"❌ DEBUG: Error in on_member_join: {e}")
             logging.error(f"Error in on_member_join for {member.name}: {e}")
+            import traceback
+            traceback.print_exc()
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
@@ -245,6 +264,93 @@ class MemberManagement(commands.Cog):
                     await logs_channel.send(embed=embed)
                 except Exception as e:
                     logging.error(f"Failed to send log message: {e}")
+
+    @app_commands.command(name="test_member_join", description="Test the member join functionality")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(user="The user to test with")
+    async def test_member_join(self, interaction: discord.Interaction, user: discord.Member):
+        """Test the member join functionality manually"""
+        await interaction.response.defer(ephemeral=True)
+        
+        # Create test log embed
+        test_embed = discord.Embed(
+            title="🧪 Manual Test Started",
+            description=f"Testing member join functionality for {user.mention}",
+            color=discord.Color.yellow(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        test_embed.add_field(name="Tested By", value=interaction.user.mention, inline=True)
+        test_embed.add_field(name="Test Subject", value=user.mention, inline=True)
+        test_embed.add_field(name="Current Roles", value=", ".join([role.name for role in user.roles]) if user.roles else "None", inline=False)
+        test_embed.set_footer(text="Manual Test")
+        
+        # Send to logs
+        await self.send_to_logs(interaction.guild, test_embed)
+        
+        print(f"🧪 MANUAL TEST: Testing member join for {user.name}")
+        
+        # Run the test
+        try:
+            await self.on_member_join(user)
+            
+            # Create success log
+            success_embed = discord.Embed(
+                title="✅ Manual Test Completed",
+                description=f"Member join test completed for {user.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            
+            # Check if user was processed
+            if user.id in self.member_original_roles:
+                stored_roles = []
+                for role_id in self.member_original_roles[user.id]:
+                    role = interaction.guild.get_role(role_id)
+                    if role:
+                        stored_roles.append(role.name)
+            
+                success_embed.add_field(name="Roles Stored", value=", ".join(stored_roles) if stored_roles else "None", inline=False)
+                success_embed.add_field(name="Monitoring Status", value="✅ Added to monitoring" if user.id in self.users_awaiting_verification else "❌ Not monitored", inline=True)
+            else:
+                success_embed.add_field(name="Result", value="No subscription roles found - no action taken", inline=False)
+            
+            success_embed.set_footer(text="Manual Test Result")
+            
+            # Send to logs
+            await self.send_to_logs(interaction.guild, success_embed)
+            
+            await interaction.followup.send(f"✅ Test completed for {user.mention}. Check logs channel for detailed results.", ephemeral=True)
+            
+        except Exception as e:
+            # Create error log
+            error_embed = discord.Embed(
+                title="❌ Manual Test Failed",
+                description=f"Error during member join test for {user.mention}",
+                color=discord.Color.red(),
+                timestamp=datetime.now(timezone.utc)
+            )
+            error_embed.add_field(name="Error", value=str(e), inline=False)
+            error_embed.set_footer(text="Manual Test Error")
+            
+            # Send to logs
+            await self.send_to_logs(interaction.guild, error_embed)
+            
+            await interaction.followup.send(f"❌ Test failed for {user.mention}. Check logs channel for error details.", ephemeral=True)
+
+    async def send_to_logs(self, guild, embed):
+        """Helper function to send embeds to logs channel"""
+        logs_channel_id = os.getenv('LOGS_CHANNEL_ID')
+        if logs_channel_id:
+            logs_channel = guild.get_channel(int(logs_channel_id))
+            if logs_channel:
+                try:
+                    await logs_channel.send(embed=embed)
+                except Exception as e:
+                    print(f"❌ Failed to send to logs channel: {e}")
+            else:
+                print(f"❌ Logs channel not found: {logs_channel_id}")
+        else:
+            print("❌ LOGS_CHANNEL_ID not set in environment variables")
 
     @app_commands.command(name="check_stored_roles", description="Check how many members have stored subscription roles")
     @app_commands.default_permissions(administrator=True)
