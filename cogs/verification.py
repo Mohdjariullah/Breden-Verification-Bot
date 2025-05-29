@@ -100,7 +100,8 @@ class VerificationView(View):
             title="🎉 Welcome to Your Verification Process!",
             description=(
                 "To complete your verification and gain access to your subscription, please follow these steps:\n\n"
-                f"**1.** Book your onboarding call here: [Calendly]({os.getenv('CALENDLY_LINK')})\n"
+                "# 📅 STEP 1: BOOK YOUR CALL\n"
+                f"## 👉 [**CLICK HERE TO BOOK YOUR ONBOARDING CALL**]({os.getenv('CALENDLY_LINK')}) 👈\n\n"
                 "**2.** After booking, click the 'I Have Booked' button below\n\n"
                 f"**Note:** This ticket closes <t:{exp_ts}:R>"
             ),
@@ -175,12 +176,19 @@ class VerificationView(View):
                     logging.error(f"Failed to send log message: {e}")
 
 class ConfirmBookingView(discord.ui.View):
-    def __init__(self, user):
+    def __init__(self, authorized_user):
         super().__init__(timeout=None)
-        self.user = user
+        self.authorized_user = authorized_user
 
     @discord.ui.button(label="I Have Booked", style=discord.ButtonStyle.green, emoji="✅")
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Check if the person clicking is the authorized user
+        if interaction.user.id != self.authorized_user.id:
+            return await interaction.response.send_message(
+                "❌ Only the person who started this verification can use this button!",
+                ephemeral=True
+            )
+        
         await interaction.response.defer(ephemeral=True)
         
         try:
