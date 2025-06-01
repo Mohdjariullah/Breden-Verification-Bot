@@ -1,8 +1,12 @@
+import asyncio
+import io
 import discord
 from discord.ext import commands
 from discord import app_commands
 import logging
 import os
+import json
+from datetime import datetime, timezone
 from .verification import VerificationView
 
 class Welcome(commands.Cog):
@@ -57,54 +61,293 @@ class Welcome(commands.Cog):
         except Exception as e:
             logging.error(f"Error in on_ready welcome setup: {e}")
 
-    @app_commands.command(name="setup_permissions", description="Setup channel permissions for verification system")
+    @app_commands.command(name="setup_permissions", description="⚠️ Dangerous Command Irreversible: Setup channel permissions for verification system")
     @app_commands.default_permissions(administrator=True)
     async def setup_permissions(self, interaction: discord.Interaction):
-        """Setup channel permissions for verification system"""
-        # Defer immediately to prevent timeout
-        await interaction.response.defer(ephemeral=True)
+        """Setup channel permissions for verification system with double confirmation and backup"""
+
+        # First confirmation embed
+        first_confirm_embed = discord.Embed(
+            title="⚠️ DANGEROUS OPERATION - First Confirmation",
+            description=(
+                "🚨 **THIS WILL MODIFY ALL CHANNEL PERMISSIONS** 🚨\n\n"
+                "**What this command will do:**\n"
+                "• Hide ALL channels from @everyone\n"
+                "• Make welcome channel visible but read-only\n"
+                "• This affects **ALL** channels in the server\n\n"
+                "**⚠️ This operation is IRREVERSIBLE without manual restoration**\n\n"
+                "Are you **ABSOLUTELY SURE** you want to continue?"
+            ),
+            color=discord.Color.red()
+        )
+        first_confirm_embed.set_footer(text="Step 1 of 2 - First Confirmation Required")
+
+        view1 = discord.ui.View(timeout=60)
+        proceed_btn = discord.ui.Button(label="⚠️ I Understand - Proceed", style=discord.ButtonStyle.danger)
+        cancel_btn = discord.ui.Button(label="❌ Cancel", style=discord.ButtonStyle.secondary)
+
+        async def first_proceed_callback(interact: discord.Interaction):
+            if interact.user.id != interaction.user.id:
+                return await interact.response.send_message("❌ Only the command user can use this button!", ephemeral=True)
+            
+            # Second confirmation embed with more details
+            second_confirm_embed = discord.Embed(
+                title="🔥 FINAL CONFIRMATION - Last Chance!",
+                description=(
+                    "**FINAL WARNING - POINT OF NO RETURN**\n\n"
+                    f"**Server:** {interaction.guild.name}\n"
+                    f"**Total Channels:** {len(interaction.guild.channels)}\n"
+                    f"**Initiated by:** {interaction.user.mention}\n"
+                    f"**Time:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>\n\n"
+                    "✅ **I will backup current permissions to logs**\n"
+                    "✅ **I will provide a restore command afterward**\n"
+                    "⚠️ **This will affect ALL server channels**\n\n"
+                    "**Type 'CONFIRM PERMISSIONS' in the next 30 seconds to proceed**"
+                ),
+                color=discord.Color.dark_red()
+            )
+            second_confirm_embed.set_footer(text="Step 2 of 2 - Type 'CONFIRM PERMISSIONS' to proceed")
+
+            await interact.response.edit_message(embed=second_confirm_embed, view=None)
+
+            # Wait for text confirmation
+            def check(msg):
+                return (msg.author.id == interaction.user.id and 
+                       msg.channel.id == interaction.channel.id and 
+                       msg.content.upper() == "CONFIRM PERMISSIONS")
+
+            try:
+                confirmation_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
+                await confirmation_msg.delete()
+                
+                # Proceed with permission setup
+                await self.execute_permission_setup(interact, interaction.guild, interaction.user)
+                
+            except asyncio.TimeoutError:
+                timeout_embed = discord.Embed(
+                    title="⏰ Operation Cancelled",
+                    description="Permission setup cancelled due to timeout. No changes were made.",
+                    color=discord.Color.orange()
+                )
+                await interact.edit_original_response(embed=timeout_embed)
+
+        async def first_cancel_callback(interact: discord.Interaction):
+            if interact.user.id != interaction.user.id:
+                return await interact.response.send_message("❌ Only the command user can use this button!", ephemeral=True)
+            
+            await interact.response.edit_message(
+                content="❌ Permission setup cancelled. No changes were made.", 
+                embed=None, 
+                view=None
+            )
+
+        proceed_btn.callback = first_proceed_callback
+        cancel_btn.callback = first_cancel_callback
+        view1.add_item(proceed_btn)
+        view1.add_item(cancel_btn)
+
+        await interaction.response.send_message(embed=first_confirm_embed, view=view1, ephemeral=True)
+
+    async def execute_permission_setup(self, interaction, guild, user):
+        """Execute the actual permission setup with backup"""
+        await interaction.edit_original_response(
+            content="⏳ **Step 1/3:** Backing up current permissions...", 
+            embed=None, 
+            view=None
+        )
+
+        # Backup current permissions
+        backup_data = await self.backup_current_permissions(guild)
+        backup_timestamp = datetime.now(timezone.utc)
         
-        guild = interaction.guild
-        everyone_role = guild.default_role
+        # Store backup in logs
+        backup_message = await self.store_backup_in_logs(guild, backup_data, backup_timestamp, user)
+
+        await interaction.edit_original_response(content="⏳ **Step 2/3:** Applying new permissions...")
+
+        # Apply new permissions
         welcome_channel_id = int(os.getenv('WELCOME_CHANNEL_ID'))
-        
+        everyone_role = guild.default_role
         channels_updated = 0
         errors = 0
-        
+        error_details = []
+
         try:
             for channel in guild.channels:
                 try:
                     if channel.id == welcome_channel_id:
-                        # Allow everyone to see welcome channel but not send messages
                         await channel.set_permissions(everyone_role, view_channel=True, send_messages=False)
                         logging.info(f"Set permissions for welcome channel: {channel.name}")
                         channels_updated += 1
                     else:
-                        # Hide other channels from unverified users (those with only @everyone role)
                         await channel.set_permissions(everyone_role, view_channel=False)
                         logging.info(f"Hidden channel from @everyone: {channel.name}")
                         channels_updated += 1
                 except Exception as e:
-                    logging.error(f"Error setting permissions for channel {channel.name}: {e}")
+                    error_msg = f"Error setting permissions for channel {channel.name}: {e}"
+                    logging.error(error_msg)
+                    error_details.append(f"• {channel.name}: {str(e)[:50]}...")
                     errors += 1
-            
-            # Send followup message
-            embed = discord.Embed(
-                title="✅ Permissions Setup Complete",
-                description=f"Updated permissions for **{channels_updated}** channels.",
-                color=discord.Color.green()
+
+            await interaction.edit_original_response(content="⏳ **Step 3/3:** Generating completion report...")
+
+            # Create completion embed
+            completion_embed = discord.Embed(
+                title="✅ Permission Setup Complete",
+                description=f"Successfully updated permissions for **{channels_updated}** channels.",
+                color=discord.Color.green(),
+                timestamp=datetime.now(timezone.utc)
             )
-            
+
             if errors > 0:
-                embed.add_field(name="⚠️ Errors", value=f"{errors} channels had permission errors", inline=False)
-            
-            embed.add_field(name="Welcome Channel", value=f"<#{welcome_channel_id}> - Visible, no sending", inline=False)
-            embed.add_field(name="Other Channels", value="Hidden from @everyone", inline=False)
-            
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
+                completion_embed.add_field(
+                    name="⚠️ Errors Encountered", 
+                    value=f"{errors} channels had permission errors\n" + "\n".join(error_details[:5]) + 
+                          (f"\n... and {len(error_details) - 5} more" if len(error_details) > 5 else ""),
+                    inline=False
+                )
+
+            completion_embed.add_field(
+                name="📋 Changes Made", 
+                value=(
+                    f"• Welcome Channel: <#{welcome_channel_id}> - Visible, no sending\n"
+                    f"• Other Channels: Hidden from @everyone\n"
+                    f"• Total Channels Modified: {channels_updated}"
+                ), 
+                inline=False
+            )
+
+            completion_embed.add_field(
+                name="🔄 Restore Information", 
+                value=(
+                    f"• Backup stored in logs: {backup_message.jump_url if backup_message else 'Failed to store'}\n"
+                    f"• Use `/restore_permissions` to revert changes\n"
+                    f"• Backup ID: `{backup_timestamp.strftime('%Y%m%d_%H%M%S')}`"
+                ), 
+                inline=False
+            )
+
+            completion_embed.set_footer(text=f"Operation completed by {user.name}")
+
+            await interaction.edit_original_response(content=None, embed=completion_embed)
+
         except Exception as e:
-            await interaction.followup.send(f"❌ Error setting up permissions: {e}", ephemeral=True)
+            error_embed = discord.Embed(
+                title="❌ Permission Setup Failed",
+                description=f"An error occurred during permission setup: {str(e)}",
+                color=discord.Color.red()
+            )
+            if backup_message:
+                error_embed.add_field(
+                    name="🔄 Backup Available", 
+                    value=f"Backup was created: {backup_message.jump_url}", 
+                    inline=False
+                )
+            await interaction.edit_original_response(content=None, embed=error_embed)
+
+    async def backup_current_permissions(self, guild):
+        """Backup current channel permissions"""
+        backup_data = {
+            "guild_id": guild.id,
+            "guild_name": guild.name,
+            "backup_timestamp": datetime.now(timezone.utc).isoformat(),
+            "channels": {}
+        }
+
+        for channel in guild.channels:
+            channel_perms = {}
+            for target, overwrite in channel.overwrites.items():
+                if isinstance(target, discord.Role):
+                    target_type = "role"
+                    target_id = target.id
+                    target_name = target.name
+                else:  # User
+                    target_type = "user"
+                    target_id = target.id
+                    target_name = str(target)
+
+                # Convert permissions to dict
+                perms_dict = {}
+                for perm, value in overwrite:
+                    if value is not None:
+                        perms_dict[perm] = value
+
+                channel_perms[str(target_id)] = {
+                    "type": target_type,
+                    "name": target_name,
+                    "permissions": perms_dict
+                }
+
+            backup_data["channels"][str(channel.id)] = {
+                "name": channel.name,
+                "type": str(channel.type),
+                "overwrites": channel_perms
+            }
+
+        return backup_data
+
+    async def store_backup_in_logs(self, guild, backup_data, timestamp, user):
+        """Store backup data in logs channel"""
+        logs_channel_id = os.getenv('LOGS_CHANNEL_ID')
+        if not logs_channel_id:
+            logging.warning("No logs channel configured for permission backup")
+            return None
+
+        logs_channel = guild.get_channel(int(logs_channel_id))
+        if not logs_channel:
+            logging.warning(f"Logs channel {logs_channel_id} not found")
+            return None
+
+        try:
+            # Create backup embed
+            backup_embed = discord.Embed(
+                title="🔒 Permission Backup Created",
+                description=(
+                    f"**Backup ID:** `{timestamp.strftime('%Y%m%d_%H%M%S')}`\n"
+                    f"**Created by:** {user.mention}\n"
+                    f"**Channels backed up:** {len(backup_data['channels'])}\n"
+                    f"**Created:** <t:{int(timestamp.timestamp())}:F>"
+                ),
+                color=discord.Color.blue(),
+                timestamp=timestamp
+            )
+            backup_embed.add_field(
+                name="📋 Backup Details",
+                value=(
+                    f"• Guild: {guild.name}\n"
+                    f"• Total Channels: {len(backup_data['channels'])}\n"
+                    f"• Backup Size: {len(json.dumps(backup_data))} characters"
+                ),
+                inline=False
+            )
+            backup_embed.add_field(
+                name="🔄 Restore Instructions",
+                value="Use `/restore_permissions` command with this backup ID to restore permissions",
+                inline=False
+            )
+            backup_embed.set_footer(text="Permission Backup System")
+
+            # Send backup data as file attachment
+            backup_json = json.dumps(backup_data, indent=2)
+            backup_file = discord.File(
+                fp=io.StringIO(backup_json),
+                filename=f"permission_backup_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
+            )
+
+            backup_message = await logs_channel.send(embed=backup_embed, file=backup_file)
+            logging.info(f"Permission backup stored in logs: {backup_message.jump_url}")
+            return backup_message
+
+        except Exception as e:
+            logging.error(f"Failed to store permission backup: {e}")
+            return None
+
+    @app_commands.command(name="restore_permissions", description="Restore channel permissions from a backup")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(backup_id="The backup ID from the logs (format: YYYYMMDD_HHMMSS)")
+    async def restore_permissions(self, interaction: discord.Interaction, backup_id: str):
+        """Restore channel permissions from a backup"""
+        await interaction.response.defer
 
     @app_commands.command(name="refresh_welcome", description="Manually refresh the welcome message")
     @app_commands.default_permissions(administrator=True)
