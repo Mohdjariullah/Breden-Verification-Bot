@@ -113,6 +113,77 @@ class MemberManagement(commands.Cog):
             traceback.print_exc()
 
     @commands.Cog.listener()
+    async def on_member_remove(self, member):
+        """Handle member leaves - stop monitoring and log if they had subscription roles"""
+        try:
+            print(f"\n👋 DEBUG: Member {member.name} left server {member.guild.name}")
+            
+            # Check if user was being tracked
+            had_stored_roles = member.id in self.member_original_roles
+            was_monitored = member.id in self.users_awaiting_verification
+            was_verifying = member.id in self.users_being_verified
+            
+            stored_roles_info = []
+            
+            if had_stored_roles:
+                # Get the stored role information before cleaning up
+                stored_role_ids = self.member_original_roles[member.id]
+                
+                # Convert role IDs to role names for logging
+                subscription_roles_map = {
+                    int(os.getenv('LAUNCHPAD_ROLE_ID')): "🚀 Launchpad ($98/mo)",
+                    int(os.getenv('MEMBER_ROLE_ID')): "👤 Member (Free)"
+                }
+                
+                for role_id in stored_role_ids:
+                    role_name = subscription_roles_map.get(role_id, f"Unknown Role (ID: {role_id})")
+                    stored_roles_info.append(role_name)
+                
+                print(f"🔍 DEBUG: User {member.name} left with stored subscription roles: {stored_roles_info}")
+                
+                # Clean up tracking data
+                del self.member_original_roles[member.id]
+                self.users_awaiting_verification.discard(member.id)
+                self.users_being_verified.discard(member.id)
+                
+                # Log member leave with subscription roles
+                await self.log_member_event(
+                    member.guild,
+                    "🚪 Subscriber Left",
+                    f"{member.mention} left the server with unverified subscription roles: {', '.join(stored_roles_info)}",
+                    member,
+                    discord.Color.red(),
+                    stored_roles_info
+                )
+                
+                logging.info(f"Member {member.name} ({member.id}) left with stored subscription roles: {stored_roles_info}")
+                
+            else:
+                # Regular member left (no subscription roles)
+                print(f"ℹ️ DEBUG: Regular member {member.name} left (no stored roles)")
+                
+                # Still clean up any monitoring data just in case
+                self.users_awaiting_verification.discard(member.id)
+                self.users_being_verified.discard(member.id)
+                
+                # Log regular member leave
+                await self.log_member_event(
+                    member.guild,
+                    "👋 Member Left",
+                    f"{member.mention} left the server",
+                    member,
+                    discord.Color.greyple()
+                )
+                
+                logging.info(f"Regular member {member.name} ({member.id}) left the server")
+                
+        except Exception as e:
+            print(f"❌ DEBUG: Error in on_member_remove: {e}")
+            logging.error(f"Error in on_member_remove for {member.name}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    @commands.Cog.listener()
     async def on_member_update(self, before, after):
         """Monitor role changes and prevent Whop bot from re-adding roles to unverified users"""
         try:

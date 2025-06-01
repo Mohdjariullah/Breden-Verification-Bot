@@ -128,21 +128,62 @@ class VerificationView(View):
             discord.Color.blue()
         )
 
-        # Auto-close after 24 hours
+        # Auto-close after 24 hours with DM notification
         async def auto_close():
             await asyncio.sleep(86400)
             try:
+                # Send DM to user before closing ticket
+                try:
+                    dm_embed = discord.Embed(
+                        title="⏰ Verification Ticket Expired",
+                        description=(
+                            "Your verification ticket has been automatically closed after 24 hours.\n\n"
+                            "**To continue your verification:**\n"
+                            "1. Return to the verification channel\n"
+                            "2. Click the 'Start Verification' button again\n"
+                            "3. Complete your booking and verification process\n\n"
+                            "We are waiting for you to return and complete your verification!"
+                        ),
+                        color=discord.Color.orange()
+                    )
+                    dm_embed.add_field(
+                        name="📋 Your Subscription",
+                        value="\n".join(subscription_info),
+                        inline=False
+                    )
+                    dm_embed.add_field(
+                        name="🔗 Quick Actions",
+                        value=(
+                            f"• [Book Your Call]({os.getenv('CALENDLY_LINK')})\n"
+                            "• Return to server to create new ticket"
+                        ),
+                        inline=False
+                    )
+                    dm_embed.set_footer(text=f"Server: {interaction.guild.name}")
+                    
+                    await interaction.user.send(embed=dm_embed)
+                    logging.info(f"Sent DM notification to {interaction.user.name} about expired ticket")
+                    
+                except discord.Forbidden:
+                    logging.warning(f"Could not send DM to {interaction.user.name} - DMs disabled")
+                except Exception as e:
+                    logging.error(f"Error sending DM to {interaction.user.name}: {e}")
+
+                # Delete the ticket channel
                 await ticket_channel.delete()
+                
+                # Log the auto-close
                 await self.log_verification_event(
                     interaction.guild,
                     "⏰ Verification Ticket Auto-Closed",
-                    f"Verification ticket for {interaction.user.mention} auto-closed after 24 hours",
+                    f"Verification ticket for {interaction.user.mention} auto-closed after 24 hours (DM sent)",
                     interaction.user,
                     discord.Color.orange()
                 )
                 logging.info(f"Auto-closed verification ticket for {interaction.user}")
-            except Exception:
-                pass
+                
+            except Exception as e:
+                logging.error(f"Error in auto-close for {interaction.user.name}: {e}")
 
         asyncio.create_task(auto_close())
 
