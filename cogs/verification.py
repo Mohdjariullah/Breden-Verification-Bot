@@ -82,13 +82,22 @@ class VerificationView(View):
                 logging.warning(f"Could not delete duplicate ticket: {e}")
             return
 
-        # Create the ticket channel under same category
+        # Create the ticket channel with explicit overwrites
         category = getattr(getattr(interaction.channel, 'category', None), 'id', None)
         ticket_channel = None
-        if hasattr(interaction.guild, 'create_text_channel') and interaction.guild is not None:
+        if interaction.guild is None:
+            await interaction.followup.send('❌ Guild context missing. Please try again in a server.', ephemeral=True)
+            return
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            interaction.guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, manage_roles=True)
+        }
+        if hasattr(interaction.guild, 'create_text_channel'):
             try:
                 ticket_channel = await interaction.guild.create_text_channel(
                     name=ticket_name,
+                    overwrites=overwrites,
                     category=getattr(interaction.channel, 'category', None) if category else None
                 )
             except Exception as e:
@@ -97,19 +106,6 @@ class VerificationView(View):
         else:
             await interaction.followup.send('❌ Guild context missing. Please try again in a server.', ephemeral=True)
             return
-
-        # Lock it down: only the user can see/send
-        if not isinstance(interaction.user, discord.Member):
-            await interaction.followup.send('❌ You must be a server member to use this feature.', ephemeral=True)
-            return
-        if ticket_channel and hasattr(ticket_channel, 'set_permissions'):
-            try:
-                await ticket_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
-                if hasattr(interaction.guild, 'default_role') and interaction.guild.default_role is not None:
-                    await ticket_channel.set_permissions(interaction.guild.default_role, read_messages=False)
-            except Exception as e:
-                await interaction.followup.send(f'❌ Failed to set permissions: {e}', ephemeral=True)
-                return
 
         # Get user's subscription info
         stored_role_ids = member_cog.member_original_roles[interaction.user.id]
@@ -155,56 +151,54 @@ class VerificationView(View):
             discord.Color.blue()
         )
 
-        # Auto-close after 24 hours with DM notification
+        # Auto-close after 24 hours with DM notification if not verified
         async def auto_close():
             await asyncio.sleep(86400)
             try:
-                # Send DM to user before closing ticket
-                try:
-                    dm_embed = discord.Embed(
-                        title="⏰ Verification Ticket Expired",
-                        description=(
-                            "Your verification ticket has been automatically closed after 24 hours.\n\n"
-                            "**To continue your verification:**\n"
-                            "1. Return to the verification channel\n"
-                            "2. Click the 'Start Verification' button again\n"
-                            "3. Complete your booking and verification process\n\n"
-                            "We are waiting for you to return and complete your verification!"
-                        ),
-                        color=discord.Color.orange()
-                    )
-                    dm_embed.add_field(
-                        name="📋 Your Subscription",
-                        value="\n".join(subscription_info),
-                        inline=False
-                    )
-                    dm_embed.add_field(
-                        name="🔗 Quick Actions",
-                        value=(
-                            f"• [Book Your Call]({BOOKING_LINK})\n"
-                            "• Return to server to create new ticket"
-                        ),
-                        inline=False
-                    )
-                    dm_embed.set_footer(text=f"Server: {getattr(interaction.guild, 'name', 'Unknown')}")
-                    
-                    await interaction.user.send(embed=dm_embed)
-                    logging.info(f"Sent DM notification to {interaction.user.name} about expired ticket")
-                    
-                except discord.Forbidden:
-                    logging.warning(f"Could not send DM to {interaction.user.name} - DMs disabled")
-                except Exception as e:
-                    logging.error(f"Error sending DM to {interaction.user.name}: {e}")
-
+                # Check if user is still pending verification
+                if interaction.user.id in getattr(member_cog, 'member_original_roles', {}):
+                    # Send DM to user before closing ticket
+                    try:
+                        dm_embed = discord.Embed(
+                            title="⏰ Verification Ticket Expired",
+                            description=(
+                                "Your verification ticket has been automatically closed after 24 hours.\n\n"
+                                "**To continue your verification:**\n"
+                                "1. Return to the verification channel\n"
+                                "2. Click the 'Start Verification' button again\n"
+                                "3. Complete your booking and verification process\n\n"
+                                "We are waiting for you to return and complete your verification!"
+                            ),
+                            color=discord.Color.orange()
+                        )
+                        dm_embed.add_field(
+                            name="📋 Your Subscription",
+                            value="\n".join(subscription_info),
+                            inline=False
+                        )
+                        dm_embed.add_field(
+                            name="🔗 Quick Actions",
+                            value=(
+                                f"• [Book Your Call]({BOOKING_LINK})\n"
+                                "• Return to server to create new ticket"
+                            ),
+                            inline=False
+                        )
+                        dm_embed.set_footer(text=f"Server: {getattr(interaction.guild, 'name', 'Unknown')}")
+                        await interaction.user.send(embed=dm_embed)
+                        logging.info(f"Sent DM notification to {interaction.user.name} about expired ticket")
+                    except discord.Forbidden:
+                        logging.warning(f"Could not send DM to {interaction.user.name} - DMs disabled")
+                    except Exception as e:
+                        logging.error(f"Error sending DM to {interaction.user.name}: {e}")
                 # For deleting the ticket channel, use interaction.channel (the current ticket channel)
-                channel_to_delete = getattr(interaction, 'channel', None)
+                channel_to_delete = ticket_channel
                 if channel_to_delete and hasattr(channel_to_delete, 'delete'):
                     try:
                         await asyncio.sleep(5)
                         await channel_to_delete.delete()
                     except Exception as e:
                         logging.error(f'Failed to delete ticket channel: {e}')
-                
                 # Log the auto-close
                 await self.log_verification_event(
                     interaction.guild,
@@ -214,7 +208,6 @@ class VerificationView(View):
                     discord.Color.orange()
                 )
                 logging.info(f"Auto-closed verification ticket for {interaction.user}")
-                
             except Exception as e:
                 logging.error(f"Error in auto-close for {interaction.user.name}: {e}")
 
