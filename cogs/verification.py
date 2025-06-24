@@ -282,6 +282,20 @@ class ConfirmBookingView(discord.ui.View):
                         restored_roles
                     )
                     await interaction.followup.send(f"✅ Verification complete! Your subscription roles have been restored: {', '.join(role_names)}\n\nWe will continue to monitor your access for a short period to ensure no other bot removes your roles.", ephemeral=True)
+                    # Schedule a DM after 40 seconds to congratulate the user
+                    async def send_verified_dm():
+                        await asyncio.sleep(40)
+                        try:
+                            dm_embed = discord.Embed(
+                                title="🎉 You Are Verified!",
+                                description="You now have full access to the server. Enjoy your stay and make the most of your subscription!",
+                                color=discord.Color.green()
+                            )
+                            dm_embed.set_footer(text=f"Server: {getattr(interaction.guild, 'name', 'Unknown')}")
+                            await interaction.user.send(embed=dm_embed)
+                        except Exception as e:
+                            logging.warning(f"Could not send verification DM to {interaction.user.name}: {e}")
+                    asyncio.create_task(send_verified_dm())
                 elif restored_roles and missing_roles:
                     await interaction.followup.send(f"⚠️ We tried to restore your roles, but some roles could not be added: {', '.join(str(rid) for rid in missing_roles)}. Please contact an admin for help.", ephemeral=True)
                     await self.log_verification_event(
