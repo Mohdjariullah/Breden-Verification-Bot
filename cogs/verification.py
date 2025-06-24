@@ -57,29 +57,25 @@ class VerificationView(View):
                 ephemeral=True
             )
 
-        # Prevent duplicate tickets
+        # Prevent duplicate tickets (only allow one open ticket per user)
         ticket_name = f"verify-{interaction.user.name.lower()}"
-        existing = discord.utils.get(getattr(interaction.guild, 'channels', []), name=ticket_name)
+        existing = None
+        for channel in getattr(interaction.guild, 'channels', []):
+            if channel.name == ticket_name and interaction.user in getattr(channel, 'members', []):
+                existing = channel
+                break
         if existing:
-            close_ts = int((datetime.now(timezone.utc) + timedelta(seconds=20)).timestamp())
             await interaction.followup.send(
                 embed=discord.Embed(
                     title="🎫 Active Ticket Found",
                     description=(
                         f"You already have an active verification ticket: {existing.mention}\n"
-                        f"This message will auto-close <t:{close_ts}:R>"
+                        f"Please use your existing ticket to complete verification."
                     ),
                     color=discord.Color.yellow()
                 ),
                 ephemeral=True
             )
-            # Schedule deletion in 20s
-            await asyncio.sleep(20)
-            try:
-                await existing.delete()
-                logging.info(f"Deleted duplicate ticket for {interaction.user}")
-            except Exception as e:
-                logging.warning(f"Could not delete duplicate ticket: {e}")
             return
 
         # Create the ticket channel with explicit overwrites
