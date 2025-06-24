@@ -7,6 +7,15 @@ import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
 
+BOOKING_LINK = os.getenv('CALENDLY_LINK')
+
+def get_env_role_id(var_name):
+    value = os.getenv(var_name)
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
 class VerificationView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -16,16 +25,15 @@ class VerificationView(View):
         style=discord.ButtonStyle.green,
         custom_id="verify_button",
         emoji="🔒"
-    )
-    async def verify_button(self, interaction: discord.Interaction, button: discord.Button):
+    ) # type: ignore
+    async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
         # Check if user already has any of the subscription roles
-        subscription_roles = {
-            int(os.getenv('LAUNCHPAD_ROLE_ID')),  # $98/mo role
-            int(os.getenv('MEMBER_ROLE_ID'))      # Free role
-        }
-        user_roles = {r.id for r in interaction.user.roles}
+        launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
+        member_role_id = get_env_role_id('MEMBER_ROLE_ID')
+        subscription_roles = set(filter(None, [launchpad_role_id, member_role_id]))
+        user_roles = {r.id for r in getattr(interaction.user, 'roles', [])}
 
         if user_roles & subscription_roles:
             return await interaction.followup.send(
@@ -38,8 +46,8 @@ class VerificationView(View):
             )
 
         # Check if user has stored roles (meaning they need verification)
-        member_cog = interaction.client.get_cog('MemberManagement')
-        if not member_cog or interaction.user.id not in member_cog.member_original_roles:
+        member_cog = getattr(getattr(interaction, 'client', None), 'get_cog', lambda name: None)('MemberManagement') # type: ignore
+        if not member_cog or interaction.user.id not in getattr(member_cog, 'member_original_roles', {}):
             return await interaction.followup.send(
                 embed=discord.Embed(
                     title="❌ No Subscription Found",
@@ -51,7 +59,7 @@ class VerificationView(View):
 
         # Prevent duplicate tickets
         ticket_name = f"verify-{interaction.user.name.lower()}"
-        existing = discord.utils.get(interaction.guild.channels, name=ticket_name)
+        existing = discord.utils.get(getattr(interaction.guild, 'channels', []), name=ticket_name)
         if existing:
             close_ts = int((datetime.now(timezone.utc) + timedelta(seconds=20)).timestamp())
             await interaction.followup.send(
@@ -75,22 +83,41 @@ class VerificationView(View):
             return
 
         # Create the ticket channel under same category
-        ticket_channel = await interaction.guild.create_text_channel(
-            name=ticket_name,
-            category=interaction.channel.category
-        )
+        category = getattr(getattr(interaction.channel, 'category', None), 'id', None)
+        ticket_channel = None
+        if hasattr(interaction.guild, 'create_text_channel') and interaction.guild is not None:
+            try:
+                ticket_channel = await interaction.guild.create_text_channel(
+                    name=ticket_name,
+                    category=getattr(interaction.channel, 'category', None) if category else None
+                )
+            except Exception as e:
+                await interaction.followup.send(f'❌ Failed to create ticket channel: {e}', ephemeral=True)
+                return
+        else:
+            await interaction.followup.send('❌ Guild context missing. Please try again in a server.', ephemeral=True)
+            return
 
         # Lock it down: only the user can see/send
-        await ticket_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
-        await ticket_channel.set_permissions(interaction.guild.default_role, read_messages=False)
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.followup.send('❌ You must be a server member to use this feature.', ephemeral=True)
+            return
+        if ticket_channel and hasattr(ticket_channel, 'set_permissions'):
+            try:
+                await ticket_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
+                if hasattr(interaction.guild, 'default_role') and interaction.guild.default_role is not None:
+                    await ticket_channel.set_permissions(interaction.guild.default_role, read_messages=False)
+            except Exception as e:
+                await interaction.followup.send(f'❌ Failed to set permissions: {e}', ephemeral=True)
+                return
 
         # Get user's subscription info
         stored_role_ids = member_cog.member_original_roles[interaction.user.id]
         subscription_info = []
         for role_id in stored_role_ids:
-            if role_id == int(os.getenv('LAUNCHPAD_ROLE_ID')):
+            if launchpad_role_id and role_id == launchpad_role_id:
                 subscription_info.append("🚀 VIP ($98/mo),($750/yr), or $1,000 for lifetime access)")
-            elif role_id == int(os.getenv('MEMBER_ROLE_ID')):
+            elif member_role_id and role_id == member_role_id:
                 subscription_info.append("👤 Member (Free)")
 
         # Send the welcome embed with booking CTA
@@ -101,7 +128,7 @@ class VerificationView(View):
             description=(
                 "To complete your verification and gain access to your subscription, please follow these steps:\n\n"
                 "# 📅 STEP 1: BOOK YOUR CALL\n"
-                f"## 👉 [**CLICK HERE TO BOOK YOUR ONBOARDING CALL**]({os.getenv('CALENDLY_LINK')}) 👈\n\n"
+                f"## 👉 [**CLICK HERE TO BOOK YOUR ONBOARDING CALL**]({BOOKING_LINK}) 👈\n\n"
                 "**2.** After booking, click the 'I Have Booked' button below\n\n"
                 f"**Note:** This ticket closes <t:{exp_ts}:R>"
             ),
@@ -154,12 +181,12 @@ class VerificationView(View):
                     dm_embed.add_field(
                         name="🔗 Quick Actions",
                         value=(
-                            f"• [Book Your Call]({os.getenv('CALENDLY_LINK')})\n"
+                            f"• [Book Your Call]({BOOKING_LINK})\n"
                             "• Return to server to create new ticket"
                         ),
                         inline=False
                     )
-                    dm_embed.set_footer(text=f"Server: {interaction.guild.name}")
+                    dm_embed.set_footer(text=f"Server: {getattr(interaction.guild, 'name', 'Unknown')}")
                     
                     await interaction.user.send(embed=dm_embed)
                     logging.info(f"Sent DM notification to {interaction.user.name} about expired ticket")
@@ -169,8 +196,14 @@ class VerificationView(View):
                 except Exception as e:
                     logging.error(f"Error sending DM to {interaction.user.name}: {e}")
 
-                # Delete the ticket channel
-                await ticket_channel.delete()
+                # For deleting the ticket channel, use interaction.channel (the current ticket channel)
+                channel_to_delete = getattr(interaction, 'channel', None)
+                if channel_to_delete and hasattr(channel_to_delete, 'delete'):
+                    try:
+                        await asyncio.sleep(5)
+                        await channel_to_delete.delete()
+                    except Exception as e:
+                        logging.error(f'Failed to delete ticket channel: {e}')
                 
                 # Log the auto-close
                 await self.log_verification_event(
@@ -234,11 +267,21 @@ class ConfirmBookingView(discord.ui.View):
         
         try:
             # Get the member management cog to restore roles
-            member_cog = interaction.client.get_cog('MemberManagement')
+            member_cog = getattr(getattr(interaction, 'client', None), 'get_cog', lambda name: None)('MemberManagement') # type: ignore
             if member_cog:
+                await interaction.followup.send(
+                    "⏳ Please wait while we restore your subscription roles and double-check your access. This may take up to 2 minutes...",
+                    ephemeral=True
+                )
                 restored_roles = await member_cog.restore_member_roles(interaction.user)
-                
-                if restored_roles:
+                # Refresh the member object to get latest roles
+                member = None
+                if interaction.guild and hasattr(interaction.guild, 'get_member'):
+                    member = interaction.guild.get_member(interaction.user.id)
+                subscription_role_ids = set([role.id for role in restored_roles]) if restored_roles else set()
+                user_role_ids = {role.id for role in member.roles} if member else set()
+                missing_roles = subscription_role_ids - user_role_ids
+                if restored_roles and not missing_roles:
                     role_names = [role.name for role in restored_roles]
                     # Log successful verification
                     await self.log_verification_event(
@@ -249,20 +292,32 @@ class ConfirmBookingView(discord.ui.View):
                         discord.Color.green(),
                         restored_roles
                     )
-                    
-                    await interaction.followup.send(f"✅ Verification complete! Your subscription roles have been restored: {', '.join(role_names)}", ephemeral=True)
+                    await interaction.followup.send(f"✅ Verification complete! Your subscription roles have been restored: {', '.join(role_names)}\n\nWe will continue to monitor your access for a short period to ensure no other bot removes your roles.", ephemeral=True)
+                elif restored_roles and missing_roles:
+                    await interaction.followup.send(f"⚠️ We tried to restore your roles, but some roles could not be added: {', '.join(str(rid) for rid in missing_roles)}. Please contact an admin for help.", ephemeral=True)
+                    await self.log_verification_event(
+                        interaction.guild,
+                        "❌ Verification Role Restoration Failed",
+                        f"{interaction.user.mention} did not receive all subscription roles after verification retries. Manual intervention required.",
+                        interaction.user,
+                        discord.Color.red(),
+                        restored_roles
+                    )
                 else:
                     await interaction.followup.send("✅ Verification complete! No roles to restore.", ephemeral=True)
-            
-            # Close ticket channel
-            await asyncio.sleep(5)
-            await interaction.channel.delete()
+            # For deleting the ticket channel, use interaction.channel (the current ticket channel)
+            channel_to_delete = getattr(interaction, 'channel', None)
+            if channel_to_delete and hasattr(channel_to_delete, 'delete'):
+                try:
+                    await asyncio.sleep(5)
+                    await channel_to_delete.delete()
+                except Exception as e:
+                    logging.error(f'Failed to delete ticket channel: {e}')
             logging.info(f"Closed verification ticket for {interaction.user.name}")
-            
+        
         except discord.Forbidden:
             logging.error(f"Permission error during role restoration for {interaction.user.name}")
             await interaction.followup.send("❌ Bot lacks required permissions to restore roles", ephemeral=True)
-            
             # Log failed verification
             await self.log_verification_event(
                 interaction.guild,
@@ -274,7 +329,6 @@ class ConfirmBookingView(discord.ui.View):
         except Exception as e:
             logging.error(f"Error in verification process for {interaction.user.name}: {e}")
             await interaction.followup.send("❌ Error during verification process", ephemeral=True)
-            
             # Log failed verification
             await self.log_verification_event(
                 interaction.guild,
@@ -315,6 +369,8 @@ class ConfirmBookingView(discord.ui.View):
 class Verification(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        global BOOKING_LINK
+        self.booking_link = BOOKING_LINK
 
     @app_commands.command(name="setup_logs", description="Set a channel as verification logs channel")
     @app_commands.default_permissions(administrator=True)
@@ -352,6 +408,50 @@ class Verification(commands.Cog):
             embed.add_field(name="❌ Test Result", value=f"Bot cannot send messages: {e}", inline=False)
             embed.color = discord.Color.red()
         
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="set_booking_link", description="Set the booking link for verification")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(url="The new booking link URL")
+    async def set_booking_link(self, interaction: discord.Interaction, url: str):
+        """Set the booking link for verification"""
+        global BOOKING_LINK
+        self.booking_link = url
+        BOOKING_LINK = url
+        await interaction.response.send_message(f"✅ Booking link updated to: {url}", ephemeral=True)
+
+    @app_commands.command(name="reload_cogs", description="Reload all bot cogs")
+    @app_commands.default_permissions(administrator=True)
+    async def reload_cogs(self, interaction: discord.Interaction):
+        """Reload all bot cogs"""
+        cogs = ["cogs.verification", "cogs.member_management", "cogs.welcome"]
+        results = []
+        for cog in cogs:
+            try:
+                await self.bot.reload_extension(cog)
+                results.append(f"✅ {cog} reloaded")
+            except Exception as e:
+                results.append(f"❌ {cog} failed: {e}")
+        await interaction.response.send_message("\n".join(results), ephemeral=True)
+
+    @app_commands.command(name="verification_stats", description="Show verification statistics")
+    @app_commands.default_permissions(administrator=True)
+    async def verification_stats(self, interaction: discord.Interaction):
+        """Show verification statistics"""
+        member_cog = self.bot.get_cog('MemberManagement')
+        if not member_cog:
+            await interaction.response.send_message("❌ MemberManagement cog not loaded.", ephemeral=True)
+            return
+        total_pending = len(getattr(member_cog, 'member_original_roles', {}))
+        total_failed = len(getattr(member_cog, 'failed_verification_logged', {}))
+        total_verified = getattr(member_cog, 'total_verified', 0) if hasattr(member_cog, 'total_verified') else 0
+        embed = discord.Embed(
+            title="📊 Verification Stats",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Pending Verifications", value=str(total_pending), inline=True)
+        embed.add_field(name="Failed Verifications", value=str(total_failed), inline=True)
+        embed.add_field(name="Completed Verifications", value=str(total_verified), inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def setup(bot):

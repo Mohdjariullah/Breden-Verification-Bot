@@ -96,8 +96,13 @@ class BredenBot(commands.Bot):
         # List all available slash commands
         print("\n📋 Available slash commands:")
         for command in self.tree.get_commands():
-            print(f"  /{command.name} - {command.description}")
-        
+            # Some commands (like ContextMenu) may not have a 'description' attribute
+            desc = getattr(command, "description", None)
+            if desc is not None:
+                print(f"  /{command.name} - {desc}")
+            else:
+                print(f"  /{command.name}")
+
         # Set custom status - DND with "Watching Gates of Server"
         try:
             await self.change_presence(
@@ -183,9 +188,14 @@ async def debug(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 if __name__ == "__main__":
-    print("🚀 Starting Breden Verification Bot...")
-    try:
-        bot.run(os.getenv('TOKEN'))
-    except Exception as e:
-        print(f"❌ Failed to start bot: {e}")
-        logging.error(f"Failed to start bot: {e}")
+    print("🚀 Starting Brendan Verification Bot...")
+    token = os.getenv('TOKEN')
+    if not token:
+        print("❌ Failed to start bot: TOKEN environment variable is not set.")
+        logging.error("Failed to start bot: TOKEN environment variable is not set.")
+    else:
+        try:
+            bot.run(token)
+        except Exception as e:
+            print(f"❌ Failed to start bot: {e}")
+            logging.error(f"Failed to start bot: {e}")

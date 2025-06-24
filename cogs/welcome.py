@@ -17,14 +17,16 @@ class Welcome(commands.Cog):
     async def on_ready(self):
         """Setup welcome channel when bot is ready"""
         try:
-            guild = self.bot.get_guild(int(os.getenv('GUILD_ID')))
+            guild_id = os.getenv('GUILD_ID')
+            guild = self.bot.get_guild(int(guild_id)) if guild_id and hasattr(self.bot, 'get_guild') else None
             if not guild:
-                logging.error(f"Guild with ID {os.getenv('GUILD_ID')} not found")
+                logging.error(f"Guild with ID {guild_id} not found")
                 return
                 
-            welcome_channel = self.bot.get_channel(int(os.getenv('WELCOME_CHANNEL_ID')))
+            welcome_channel_id = os.getenv('WELCOME_CHANNEL_ID')
+            welcome_channel = self.bot.get_channel(int(welcome_channel_id)) if welcome_channel_id and hasattr(self.bot, 'get_channel') else None
             if not welcome_channel:
-                logging.error(f"Welcome channel with ID {os.getenv('WELCOME_CHANNEL_ID')} not found")
+                logging.error(f"Welcome channel with ID {welcome_channel_id} not found")
                 return
                 
             # Clean up only bot's previous messages
@@ -95,8 +97,8 @@ class Welcome(commands.Cog):
                 title="🔥 FINAL CONFIRMATION - Last Chance!",
                 description=(
                     "**FINAL WARNING - POINT OF NO RETURN**\n\n"
-                    f"**Server:** {interaction.guild.name}\n"
-                    f"**Total Channels:** {len(interaction.guild.channels)}\n"
+                    f"**Server:** {getattr(interaction.guild, 'name', 'Unknown')}\n"
+                    f"**Total Channels:** {len(getattr(interaction.guild, 'channels', []))}\n"
                     f"**Initiated by:** {interaction.user.mention}\n"
                     f"**Time:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>\n\n"
                     "✅ **I will backup current permissions to logs**\n"
@@ -112,9 +114,13 @@ class Welcome(commands.Cog):
 
             # Wait for text confirmation
             def check(msg):
-                return (msg.author.id == interaction.user.id and 
-                       msg.channel.id == interaction.channel.id and 
-                       msg.content.upper() == "CONFIRM PERMISSIONS")
+                return (
+                    msg.author.id == interaction.user.id and
+                    msg.channel is not None and
+                    interaction.channel is not None and
+                    msg.channel.id == interaction.channel.id and
+                    msg.content.upper() == "CONFIRM PERMISSIONS"
+                )
 
             try:
                 confirmation_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
@@ -141,8 +147,8 @@ class Welcome(commands.Cog):
                 view=None
             )
 
-        proceed_btn.callback = first_proceed_callback
-        cancel_btn.callback = first_cancel_callback
+        proceed_btn.callback = first_proceed_callback # type: ignore
+        cancel_btn.callback = first_cancel_callback # type: ignore
         view1.add_item(proceed_btn)
         view1.add_item(cancel_btn)
 
@@ -166,8 +172,17 @@ class Welcome(commands.Cog):
         await interaction.edit_original_response(content="⏳ **Step 2/3:** Applying new permissions...")
 
         # Apply new permissions
-        welcome_channel_id = int(os.getenv('WELCOME_CHANNEL_ID'))
+        welcome_channel_id = getattr(self.bot.get_channel(int(os.getenv('WELCOME_CHANNEL_ID', 0))), 'id', None) if os.getenv('WELCOME_CHANNEL_ID') else None
+        welcome_channel = self.bot.get_channel(int(welcome_channel_id)) if welcome_channel_id and hasattr(self.bot, 'get_channel') else None
+        if not welcome_channel:
+            logging.error(f"Welcome channel with ID {welcome_channel_id} not found")
+            return
+        
         everyone_role = guild.default_role
+        if not everyone_role:
+            logging.error("Default role not found")
+            return
+        
         channels_updated = 0
         errors = 0
         error_details = []
@@ -248,8 +263,8 @@ class Welcome(commands.Cog):
     async def backup_current_permissions(self, guild):
         """Backup current channel permissions"""
         backup_data = {
-            "guild_id": guild.id,
-            "guild_name": guild.name,
+            "guild_id": getattr(guild, 'id', None),
+            "guild_name": getattr(guild, 'name', 'Unknown'),
             "backup_timestamp": datetime.now(timezone.utc).isoformat(),
             "channels": {}
         }
@@ -259,11 +274,11 @@ class Welcome(commands.Cog):
             for target, overwrite in channel.overwrites.items():
                 if isinstance(target, discord.Role):
                     target_type = "role"
-                    target_id = target.id
-                    target_name = target.name
+                    target_id = getattr(target, 'id', None)
+                    target_name = getattr(target, 'name', 'Unknown')
                 else:  # User
                     target_type = "user"
-                    target_id = target.id
+                    target_id = getattr(target, 'id', None)
                     target_name = str(target)
 
                 # Convert permissions to dict
@@ -278,9 +293,9 @@ class Welcome(commands.Cog):
                     "permissions": perms_dict
                 }
 
-            backup_data["channels"][str(channel.id)] = {
-                "name": channel.name,
-                "type": str(channel.type),
+            backup_data["channels"][str(getattr(channel, 'id', None))] = {
+                "name": getattr(channel, 'name', 'Unknown'),
+                "type": str(getattr(channel, 'type', 'Unknown')),
                 "overwrites": channel_perms
             }
 
@@ -314,8 +329,8 @@ class Welcome(commands.Cog):
             backup_embed.add_field(
                 name="📋 Backup Details",
                 value=(
-                    f"• Guild: {guild.name}\n"
-                    f"• Total Channels: {len(backup_data['channels'])}\n"
+                    f"• Guild: {getattr(guild, 'name', 'Unknown')}\n"
+                    f"• Total Channels: {len(getattr(guild, 'channels', []))}\n"
                     f"• Backup Size: {len(json.dumps(backup_data))} characters"
                 ),
                 inline=False
@@ -330,7 +345,7 @@ class Welcome(commands.Cog):
             # Send backup data as file attachment
             backup_json = json.dumps(backup_data, indent=2)
             backup_file = discord.File(
-                fp=io.StringIO(backup_json),
+                fp=io.BytesIO(backup_json.encode('utf-8')),
                 filename=f"permission_backup_{timestamp.strftime('%Y%m%d_%H%M%S')}.json"
             )
 
@@ -347,7 +362,7 @@ class Welcome(commands.Cog):
     @app_commands.describe(backup_id="The backup ID from the logs (format: YYYYMMDD_HHMMSS)")
     async def restore_permissions(self, interaction: discord.Interaction, backup_id: str):
         """Restore channel permissions from a backup"""
-        await interaction.response.defer
+        await interaction.response.defer(ephemeral=True)
 
     @app_commands.command(name="refresh_welcome", description="Manually refresh the welcome message")
     @app_commands.default_permissions(administrator=True)
@@ -356,7 +371,8 @@ class Welcome(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         
         try:
-            welcome_channel = self.bot.get_channel(int(os.getenv('WELCOME_CHANNEL_ID')))
+            welcome_channel_id = getattr(self.bot.get_channel(int(os.getenv('WELCOME_CHANNEL_ID', 0))), 'id', None) if os.getenv('WELCOME_CHANNEL_ID') else None
+            welcome_channel = self.bot.get_channel(int(welcome_channel_id)) if welcome_channel_id and hasattr(self.bot, 'get_channel') else None
             if welcome_channel:
                 # Clean up bot's messages
                 deleted_count = 0
