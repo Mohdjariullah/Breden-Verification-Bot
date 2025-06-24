@@ -131,7 +131,7 @@ class MemberManagement(commands.Cog):
                 
                 # Convert role IDs to role names for logging
                 subscription_roles_map = {
-                    int(os.getenv('LAUNCHPAD_ROLE_ID')): "🚀 Launchpad ($98/mo)",
+                    int(os.getenv('LAUNCHPAD_ROLE_ID')): "🚀 VIP ($98/mo),($750/yr), or $1,000 for lifetime access)",
                     int(os.getenv('MEMBER_ROLE_ID')): "👤 Member (Free)"
                 }
                 
@@ -446,8 +446,8 @@ class MemberManagement(commands.Cog):
             # Show some details about pending verifications
             pending_users = []
             subscription_roles = {
-                int(os.getenv('LAUNCHPAD_ROLE_ID')): "Launchpad ($98/mo)",
-                int(os.getenv('MEMBER_ROLE_ID')): "Member (Free)"
+                int(os.getenv('LAUNCHPAD_ROLE_ID')): "🚀 VIP ($98/mo),($750/yr), or $1,000 for lifetime access)",
+                int(os.getenv('MEMBER_ROLE_ID')): "👤 Member (Free)"
             }
             
             for user_id in list(self.member_original_roles.keys())[:5]:  # Show first 5

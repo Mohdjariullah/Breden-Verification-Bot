@@ -89,7 +89,7 @@ class VerificationView(View):
         subscription_info = []
         for role_id in stored_role_ids:
             if role_id == int(os.getenv('LAUNCHPAD_ROLE_ID')):
-                subscription_info.append("🚀 Launchpad ($98/mo)")
+                subscription_info.append("🚀 VIP ($98/mo),($750/yr), or $1,000 for lifetime access)")
             elif role_id == int(os.getenv('MEMBER_ROLE_ID')):
                 subscription_info.append("👤 Member (Free)")
 
@@ -107,7 +107,7 @@ class VerificationView(View):
             ),
             color=discord.Color.green()
         )
-        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1370122090631532655/1377305621044531290/1228868654c7a053f79777f7b16ff623.png")
+        embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1370122090631532655/1386775344631119963/65fe71ca-e301-40a0-b69b-de77def4f57e.jpeg")
         embed.add_field(name="📅 Booking Status", value="Pending", inline=True)
         embed.add_field(name="⏱️ Expires", value=f"<t:{exp_ts}:f>", inline=True)
         embed.add_field(name="🎯 Subscription", value="\n".join(subscription_info), inline=False)
