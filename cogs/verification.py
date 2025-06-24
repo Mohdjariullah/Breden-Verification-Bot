@@ -447,6 +447,8 @@ class Verification(commands.Cog):
             return
         total_pending = len(getattr(member_cog, 'member_original_roles', {}))
         total_failed = len(getattr(member_cog, 'failed_verification_logged', {}))
+        # Count only entries explicitly marked as failed (value=True)
+        total_failed = sum(1 for v in getattr(member_cog, 'failed_verification_logged', {}).values() if v)
         total_verified = getattr(member_cog, 'total_verified', 0) if hasattr(member_cog, 'total_verified') else 0
         embed = discord.Embed(
             title="📊 Verification Stats",

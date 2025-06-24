@@ -110,9 +110,36 @@ class Welcome(commands.Cog):
             )
             second_confirm_embed.set_footer(text="Step 2 of 2 - Type 'CONFIRM PERMISSIONS' to proceed")
 
+            # BEGIN NEW: Add a preview of channels that will be affected and the permissions that will be applied
+            try:
+                welcome_channel_id_env = os.getenv('WELCOME_CHANNEL_ID')
+                welcome_channel_id = int(welcome_channel_id_env) if welcome_channel_id_env else None
+                preview_lines = []
+                guild_for_preview = interact.guild
+                for ch in guild_for_preview.channels if guild_for_preview else []:
+                    # Show at most 20 channels to keep the embed readable
+                    if len(preview_lines) >= 20:
+                        break
+                    if welcome_channel_id and ch.id == welcome_channel_id:
+                        preview_lines.append(f"• {ch.name} ➜ view: ✅, send: ❌ (welcome channel)")
+                    else:
+                        preview_lines.append(f"• {ch.name} ➜ view: ❌ (hidden)")
+                if preview_lines:
+                    remaining = (len(guild_for_preview.channels) if guild_for_preview else 0) - len(preview_lines)
+                    if remaining > 0:
+                        preview_lines.append(f"…and {remaining} more channel(s)")
+                    second_confirm_embed.add_field(
+                        name="📝 Channel Permission Changes (Preview)",
+                        value="\n".join(preview_lines),
+                        inline=False
+                    )
+            except Exception as e:
+                logging.error(f"Error generating permissions preview: {e}")
+            # END NEW
+
             await interact.response.edit_message(embed=second_confirm_embed, view=None)
 
-            # Wait for text confirmation
+            # Wait for the text confirmation from the command initiator
             def check(msg):
                 return (
                     msg.author.id == interaction.user.id and
@@ -125,10 +152,10 @@ class Welcome(commands.Cog):
             try:
                 confirmation_msg = await self.bot.wait_for('message', check=check, timeout=30.0)
                 await confirmation_msg.delete()
-                
-                # Proceed with permission setup
+
+                # Proceed with permission setup once confirmed
                 await self.execute_permission_setup(interact, interaction.guild, interaction.user)
-                
+
             except asyncio.TimeoutError:
                 timeout_embed = discord.Embed(
                     title="⏰ Operation Cancelled",

@@ -287,6 +287,9 @@ class MemberManagement(commands.Cog):
                             user_role_ids = {role.id for role in member.roles}
                             if subscription_role_ids.issubset(user_role_ids):
                                 success = True
+                                # Clear any previous failure flag immediately upon success
+                                if member.id in self.failed_verification_logged:
+                                    del self.failed_verification_logged[member.id]
                                 print(f"✅ Post-verification check: {member.name} has all roles after {attempt+1} attempt(s)")
                                 break
                             else:
