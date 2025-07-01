@@ -6,122 +6,156 @@ import os
 import asyncio
 from typing import Dict, List, Set, Optional
 from datetime import datetime, timezone
+from .security_utils import (
+    security_check, log_admin_action, safe_int_convert, 
+    validate_input, check_rate_limit, safe_audit_log_check,
+    SecureLogger, sanitize_log_message
+)
 
 def get_env_role_id(var_name):
-    value = os.getenv(var_name)
-    try:
-        return int(value) if value is not None else None
-    except Exception:
-        return None
+    return safe_int_convert(os.getenv(var_name), min_val=1, max_val=2**63-1)
 
 class MemberManagement(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         # Store member roles when they join
         self.member_original_roles: Dict[int, List[int]] = {}
-        # Track users who need role monitoring (prevent Whop bot from re-adding)
+        # Track users who need role monitoring
         self.users_awaiting_verification: Set[int] = set()
-        # Track users currently being verified to prevent race conditions
+        # Track users currently being verified
         self.users_being_verified: Set[int] = set()
-        # Track if a failed verification log was already sent for a user
+        # Track failed verifications
         self.failed_verification_logged: Dict[int, bool] = {}
         # Track total successful verifications
         self.total_verified: int = 0
-        print("🔧 MemberManagement cog initialized")
+        # Security: Lock for thread-safe operations
+        self._role_lock = asyncio.Lock()
+        SecureLogger.info("MemberManagement cog initialized with production security")
 
     @commands.Cog.listener()
     async def on_ready(self):
         """Called when the cog is ready"""
-        print("🔧 MemberManagement cog is ready!")
+        SecureLogger.info("MemberManagement cog is ready!")
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        """Handle new member joins - check for subscription roles and remove them for verification"""
-        try:
-            print(f"\n🔍 DEBUG: Member {member.name} joined server {member.guild.name}")
-            print(f"🔍 DEBUG: Member roles: {[role.name for role in member.roles]}")
-            print(f"🔍 DEBUG: Member role IDs: {[role.id for role in member.roles]}")
-            
-            # Check environment variables first
-            launchpad_role_env = os.getenv('LAUNCHPAD_ROLE_ID')
-            member_role_env = os.getenv('MEMBER_ROLE_ID')
-            
-            print(f"🔍 DEBUG: LAUNCHPAD_ROLE_ID from env: {launchpad_role_env}")
-            print(f"🔍 DEBUG: MEMBER_ROLE_ID from env: {member_role_env}")
-            
-            if not launchpad_role_env or not member_role_env:
-                print("❌ ERROR: Role IDs not set in environment variables!")
-                return
-            
-            # Define the subscription roles that need verification
-            launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
-            member_role_id = get_env_role_id('MEMBER_ROLE_ID')
-            
-            print(f"🔍 DEBUG: Looking for Launchpad role ID: {launchpad_role_id}")
-            print(f"🔍 DEBUG: Looking for Member role ID: {member_role_id}")
-            
-            subscription_roles = {launchpad_role_id, member_role_id}
-            
-            # Get user's current roles (excluding @everyone)
-            current_roles = [role for role in member.roles if role != member.guild.default_role]
-            user_role_ids = {role.id for role in current_roles}
-            
-            print(f"🔍 DEBUG: User role IDs (excluding @everyone): {user_role_ids}")
-            print(f"🔍 DEBUG: Subscription role IDs to check: {subscription_roles}")
-            
-            # Check if user has any subscription roles
-            has_subscription_roles = user_role_ids & subscription_roles
-            print(f"🔍 DEBUG: Has subscription roles: {has_subscription_roles}")
-            
-            if has_subscription_roles:
-                print(f"✅ DEBUG: User has subscription roles, removing them...")
-                # User joined with subscription roles - needs verification
-                roles_to_remove = [role for role in current_roles if role.id in subscription_roles]
+        """Handle new member joins - ALL users must verify to get Member role"""
+        async with self._role_lock:
+            try:
+                SecureLogger.info(f"Member {member.name} joined server {member.guild.name}")
                 
-                print(f"🔍 DEBUG: Roles to remove: {[role.name for role in roles_to_remove]}")
+                # Validate environment variables
+                launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
+                member_role_id = get_env_role_id('MEMBER_ROLE_ID')
+            
+                print(f"🔍 DEBUG: Looking for Launchpad role ID: {launchpad_role_id}")
+                print(f"🔍 DEBUG: Looking for Member role ID: {member_role_id}")
+            
+                subscription_roles = {launchpad_role_id, member_role_id}
+            
+                # Get user's current roles (excluding @everyone)
+                current_roles = [role for role in member.roles if role != member.guild.default_role]
+                user_role_ids = {role.id for role in current_roles}
+            
+                print(f"🔍 DEBUG: User role IDs (excluding @everyone): {user_role_ids}")
+                print(f"🔍 DEBUG: Subscription role IDs to check: {subscription_roles}")
+            
+                # Check if user has any subscription roles initially
+                has_subscription_roles = user_role_ids & subscription_roles
+                print(f"🔍 DEBUG: Has subscription roles initially: {has_subscription_roles}")
+            
+                # NEW: Add delay to catch any role assignments that happen immediately after join
+                await asyncio.sleep(2)
+            
+                # Re-check roles after delay (in case Whop bot assigns roles after join)
+                updated_member = member.guild.get_member(member.id)
+                if updated_member:
+                    updated_roles = [role for role in updated_member.roles if role != member.guild.default_role]
+                    updated_role_ids = {role.id for role in updated_roles}
+                    newly_added_subscription_roles = (updated_role_ids & subscription_roles) - has_subscription_roles
                 
-                # Store original roles (as role IDs for persistence)
-                self.member_original_roles[member.id] = [role.id for role in roles_to_remove]
+                    if newly_added_subscription_roles:
+                        print(f"🔍 DEBUG: Roles added after join delay: {newly_added_subscription_roles}")
+                        # Update our tracking
+                        current_roles = updated_roles
+                        user_role_ids = updated_role_ids
+                        has_subscription_roles = user_role_ids & subscription_roles
+                    
+                        # Log the post-join role assignment
+                        await self.log_member_event(
+                            member.guild,
+                            "🤖 Post-Join Role Assignment Detected",
+                            f"Roles added to {member.mention} after join: {', '.join([member.guild.get_role(rid).name for rid in newly_added_subscription_roles if member.guild.get_role(rid)])}",
+                            member,
+                            discord.Color.yellow()
+                        )
+            
+                # NEW LOGIC: ALL users must verify, but handle differently based on roles
+                if has_subscription_roles:
+                    print(f"✅ DEBUG: User has subscription roles, storing and removing for verification...")
+                    # User has subscription roles - store them and remove for verification
+                    roles_to_remove = [role for role in current_roles if role.id in subscription_roles]
                 
-                # Add to monitoring list to prevent Whop bot from re-adding
-                self.users_awaiting_verification.add(member.id)
+                    print(f"🔍 DEBUG: Roles to remove: {[role.name for role in roles_to_remove]}")
                 
-                # Remove subscription roles
-                await member.remove_roles(*roles_to_remove, reason="Subscription verification required")
+                    # Store original roles (as role IDs for persistence)
+                    self.member_original_roles[member.id] = [role.id for role in roles_to_remove]
                 
-                role_names = [role.name for role in roles_to_remove]
-                print(f"✅ DEBUG: Successfully removed roles: {role_names}")
-                print(f"🔍 DEBUG: Added user {member.name} to monitoring list")
-                logging.info(f"Removed subscription roles from {member.name} ({member.id}): {role_names}")
+                    # Add to monitoring list to prevent re-adding
+                    self.users_awaiting_verification.add(member.id)
                 
-                # Log member join with subscription
-                await self.log_member_event(
-                    member.guild,
-                    "🛒 Subscriber Joined",
-                    f"{member.mention} joined with subscription roles - verification required",
-                    member,
-                    discord.Color.orange(),
-                    roles_to_remove
-                )
-            else:
-                print(f"ℹ️ DEBUG: User has no subscription roles, no action needed")
-                # User joined without subscription roles - regular member
-                logging.info(f"Regular member {member.name} ({member.id}) joined without subscription roles")
+                    if updated_member:
+                        await updated_member.remove_roles(
+                            *roles_to_remove,
+                            reason="Subscription verification required - all subscription roles need verification"
+                        )
+                    else:
+                        # Member left during delay, clean up tracking
+                        self.member_original_roles.pop(member.id, None)
+                        self.users_awaiting_verification.discard(member.id)
+                        return                
+                    role_names = [role.name for role in roles_to_remove]
+                    print(f"✅ DEBUG: Successfully removed roles: {role_names}")
+                    print(f"🔍 DEBUG: Added user {member.name} to monitoring list")
+                    logging.info(f"Removed subscription roles from {member.name} ({member.id}): {role_names}")
                 
-                # Log regular member join
-                await self.log_member_event(
-                    member.guild,
-                    "👋 Member Joined",
-                    f"{member.mention} joined the server (no subscription roles)",
-                    member,
-                    discord.Color.blue()
-                )
+                    # Enhanced logging with join source detection
+                    join_source = "Discord Invite" if not newly_added_subscription_roles else "Whop Integration"
+                    await self.log_member_event(
+                        member.guild,
+                        "🛒 Subscriber Joined - Verification Required",
+                        f"{member.mention} joined with subscription roles via {join_source} - verification required",
+                        member,
+                        discord.Color.orange(),
+                        roles_to_remove
+                    )
+                else:
+                    print(f"🔍 DEBUG: User has no subscription roles, but still needs to verify for Member role")
+                    # NEW: User joined without subscription roles - still needs to verify for Member role
                 
-        except Exception as e:
-            print(f"❌ DEBUG: Error in on_member_join: {e}")
-            logging.error(f"Error in on_member_join for {member.name}: {e}")
-            import traceback
-            traceback.print_exc()
+                    # Store Member role as the role they should get after verification
+                    self.member_original_roles[member.id] = [member_role_id]
+                
+                    # Add to monitoring list
+                    self.users_awaiting_verification.add(member.id)
+                
+                    print(f"✅ DEBUG: Added user {member.name} to verification queue for Member role")
+                    logging.info(f"New user {member.name} ({member.id}) added to verification queue for Member role")
+                
+                    # Log new user join requiring verification
+                    await self.log_member_event(
+                        member.guild,
+                        "👋 New User Joined - Verification Required",
+                        f"{member.mention} joined the server - must verify to receive Member role",
+                        member,
+                        discord.Color.blue()
+                    )
+                
+            except Exception as e:
+                print(f"❌ DEBUG: Error in on_member_join: {e}")
+                logging.error(f"Error in on_member_join for {member.name}: {e}")
+                import traceback
+                traceback.print_exc()
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
@@ -150,43 +184,53 @@ class MemberManagement(commands.Cog):
                     role_name = subscription_roles_map.get(role_id, f"Unknown Role (ID: {role_id})")
                     stored_roles_info.append(role_name)
                 
-                print(f"🔍 DEBUG: User {member.name} left with stored subscription roles: {stored_roles_info}")
+                print(f"🔍 DEBUG: User {member.name} left with stored roles: {stored_roles_info}")
                 
                 # Clean up tracking data
                 del self.member_original_roles[member.id]
                 self.users_awaiting_verification.discard(member.id)
                 self.users_being_verified.discard(member.id)
                 
-                # Log member leave with subscription roles
+                # Determine if they were a subscriber or just pending member verification
+                if get_env_role_id('LAUNCHPAD_ROLE_ID') in stored_role_ids:
+                    log_title = "🚪 Subscriber Left"
+                    log_desc = f"{member.mention} left the server with unverified subscription roles: {', '.join(stored_roles_info)}"
+                    log_color = discord.Color.red()
+                else:
+                    log_title = "🚪 Unverified User Left"
+                    log_desc = f"{member.mention} left the server before completing verification"
+                    log_color = discord.Color.orange()
+                
+                # Log member leave with stored roles
                 await self.log_member_event(
                     member.guild,
-                    "🚪 Subscriber Left",
-                    f"{member.mention} left the server with unverified subscription roles: {', '.join(stored_roles_info)}",
+                    log_title,
+                    log_desc,
                     member,
-                    discord.Color.red(),
+                    log_color,
                     stored_roles_info
                 )
                 
-                logging.info(f"Member {member.name} ({member.id}) left with stored subscription roles: {stored_roles_info}")
+                logging.info(f"Member {member.name} ({member.id}) left with stored roles: {stored_roles_info}")
                 
             else:
-                # Regular member left (no subscription roles)
-                print(f"ℹ️ DEBUG: Regular member {member.name} left (no stored roles)")
+                # User left without being tracked (shouldn't happen with new logic)
+                print(f"⚠️ DEBUG: User {member.name} left without being tracked (unusual)")
                 
                 # Still clean up any monitoring data just in case
                 self.users_awaiting_verification.discard(member.id)
                 self.users_being_verified.discard(member.id)
                 
-                # Log regular member leave
+                # Log untracked member leave
                 await self.log_member_event(
                     member.guild,
-                    "👋 Member Left",
-                    f"{member.mention} left the server",
+                    "👋 Untracked User Left",
+                    f"{member.mention} left the server (was not being tracked)",
                     member,
                     discord.Color.greyple()
                 )
                 
-                logging.info(f"Regular member {member.name} ({member.id}) left the server")
+                logging.info(f"Untracked user {member.name} ({member.id}) left the server")
                 
         except Exception as e:
             print(f"❌ DEBUG: Error in on_member_remove: {e}")
@@ -196,9 +240,26 @@ class MemberManagement(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
-        """Monitor role changes and prevent Whop bot from re-adding roles to unverified users"""
+        """Monitor role changes and track who/what assigns roles"""
         try:
-            # Skip if user is not being monitored
+            # Check for role changes
+            before_role_ids = {role.id for role in before.roles}
+            after_role_ids = {role.id for role in after.roles}
+            
+            added_roles = after_role_ids - before_role_ids
+            removed_roles = before_role_ids - after_role_ids
+            
+            # Define subscription roles
+            subscription_roles = {
+                get_env_role_id('LAUNCHPAD_ROLE_ID'),
+                get_env_role_id('MEMBER_ROLE_ID')
+            }
+            
+            # NEW: Enhanced role assignment tracking
+            if added_roles or removed_roles:
+                await self.track_role_changes(before, after, added_roles, removed_roles, subscription_roles)
+            
+            # Skip monitoring logic if user is not being monitored
             if after.id not in self.users_awaiting_verification:
                 return
             
@@ -207,22 +268,11 @@ class MemberManagement(commands.Cog):
                 print(f"🔄 DEBUG: Skipping role check for {after.name} - currently being verified")
                 return
             
-            # Define subscription roles
-            subscription_roles = {
-                get_env_role_id('LAUNCHPAD_ROLE_ID'),
-                get_env_role_id('MEMBER_ROLE_ID')
-            }
-            
-            # Check if any subscription roles were added
-            before_role_ids = {role.id for role in before.roles}
-            after_role_ids = {role.id for role in after.roles}
-            
             # Find newly added subscription roles
-            added_roles = after_role_ids - before_role_ids
             added_subscription_roles = added_roles & subscription_roles
             
             if added_subscription_roles:
-                print(f"🚨 DEBUG: Whop bot re-added roles to {after.name}! Removing again...")
+                print(f"🚨 DEBUG: Unauthorized role addition detected for {after.name}! Removing...")
                 
                 # Get the role objects to remove
                 roles_to_remove = []
@@ -232,21 +282,21 @@ class MemberManagement(commands.Cog):
                         roles_to_remove.append(role)
                 
                 if roles_to_remove:
-                    # Remove the roles again (DO NOT remove from monitoring here!)
-                    await after.remove_roles(*roles_to_remove, reason="User awaiting verification - Whop bot interference")
+                    # Remove the roles again
+                    await after.remove_roles(*roles_to_remove, reason="User awaiting verification - unauthorized role assignment blocked")
                     
                     role_names = [role.name for role in roles_to_remove]
                     print(f"✅ DEBUG: Re-removed roles from {after.name}: {role_names}")
                     print(f"🔍 DEBUG: User {after.name} still being monitored")
-                    logging.info(f"Re-removed subscription roles from {after.name} (Whop bot interference): {role_names}")
+                    logging.info(f"Blocked unauthorized role assignment to {after.name}: {role_names}")
                     
-                    # Log the interference
+                    # Enhanced logging with source detection
                     await self.log_member_event(
                         after.guild,
-                        "🔄 Role Re-Removal",
-                        f"Whop bot re-added roles to {after.mention} - removed again (awaiting verification)",
+                        "🛡️ Unauthorized Role Assignment Blocked",
+                        f"Blocked role assignment to {after.mention} (awaiting verification): {', '.join(role_names)}",
                         after,
-                        discord.Color.yellow(),
+                        discord.Color.red(),
                         roles_to_remove
                     )
                     
@@ -254,13 +304,71 @@ class MemberManagement(commands.Cog):
             print(f"❌ DEBUG: Error in on_member_update: {e}")
             logging.error(f"Error in on_member_update for {after.name}: {e}")
 
+    async def track_role_changes(self, before, after, added_roles, removed_roles, subscription_roles):
+        """NEW: Track and log role changes with source detection"""
+        try:
+            # Get recent audit logs to identify who made the change
+            source_info = "Unknown"
+            try:
+                async for entry in after.guild.audit_logs(limit=5, action=discord.AuditLogAction.member_role_update):
+                    if entry.target.id == after.id:
+                        if entry.user.bot:
+                            source_info = f"Bot: {entry.user.name} ({entry.user.id})"
+                        else:
+                            source_info = f"User: {entry.user.name} ({entry.user.id})"
+                        break
+            except discord.Forbidden:
+                source_info = "Audit logs not accessible"
+            except Exception as e:
+                source_info = f"Error checking audit logs: {str(e)[:50]}"
+            
+            # Log subscription role changes
+            added_subscription = added_roles & subscription_roles
+            removed_subscription = removed_roles & subscription_roles
+            
+            if added_subscription:
+                role_names = []
+                for role_id in added_subscription:
+                    role = after.guild.get_role(role_id)
+                    if role:
+                        role_names.append(role.name)
+                
+                await self.log_member_event(
+                    after.guild,
+                    "➕ Subscription Role Added",
+                    f"Subscription roles added to {after.mention}: {', '.join(role_names)}\n**Source:** {source_info}",
+                    after,
+                    discord.Color.green()
+                )
+            
+            if removed_subscription:
+                role_names = []
+                for role_id in removed_subscription:
+                    role = before.guild.get_role(role_id)
+                    if role:
+                        role_names.append(role.name)
+                
+                await self.log_member_event(
+                    after.guild,
+                    "➖ Subscription Role Removed",
+                    f"Subscription roles removed from {after.mention}: {', '.join(role_names)}\n**Source:** {source_info}",
+                    after,
+                    discord.Color.orange()
+                )
+                
+        except Exception as e:
+            logging.error(f"Error in track_role_changes: {e}")
+
     async def restore_member_roles(self, member):
         """Restore original subscription roles to a member after verification"""
         try:
             self.users_being_verified.add(member.id)
             print(f"🔄 DEBUG: Starting verification for {member.name}")
             await asyncio.sleep(1)
+            
             restored_roles = []
+            verification_success = False  # Track if verification actually succeeded
+            
             if member.id in self.member_original_roles:
                 original_role_ids = self.member_original_roles[member.id]
                 if original_role_ids:
@@ -271,97 +379,128 @@ class MemberManagement(commands.Cog):
                             roles_to_restore.append(role)
                         else:
                             logging.warning(f"Role with ID {role_id} not found for {member.name}")
+                
                     if roles_to_restore:
+                        # Remove from monitoring BEFORE adding roles to prevent interference
                         self.users_awaiting_verification.discard(member.id)
+                        
                         await member.add_roles(*roles_to_restore, reason="Subscription verification completed")
                         restored_roles = roles_to_restore
                         role_names = [role.name for role in roles_to_restore]
                         print(f"✅ DEBUG: Successfully restored roles for {member.name}: {role_names}")
                         logging.info(f"Restored subscription roles for {member.name}: {role_names}")
+                        
+                        # Wait longer for Discord to process the role changes
+                        await asyncio.sleep(3)
+                        
+                        # Check if roles were actually added (with better logic)
                         subscription_role_ids = set([role.id for role in roles_to_restore])
-                        max_retries = 5
-                        retry_delay = 2
-                        success = False
+                        max_retries = 4
+                        retry_delay = 3
+                        
                         for attempt in range(max_retries):
-                            await asyncio.sleep(retry_delay)
-                            user_role_ids = {role.id for role in member.roles}
+                            try:
+                                # Refresh member object from Discord
+                                fresh_member = await member.guild.fetch_member(member.id)
+                                user_role_ids = {role.id for role in fresh_member.roles}
+                            except:
+                                user_role_ids = {role.id for role in member.roles}
+                            
                             if subscription_role_ids.issubset(user_role_ids):
-                                success = True
-                                # Clear any previous failure flag immediately upon success
-                                if member.id in self.failed_verification_logged:
-                                    del self.failed_verification_logged[member.id]
+                                verification_success = True
                                 print(f"✅ Post-verification check: {member.name} has all roles after {attempt+1} attempt(s)")
                                 break
                             else:
                                 print(f"⚠️ Post-verification check: {member.name} missing roles, retrying ({attempt+1}/{max_retries})")
-                                try:
-                                    await member.add_roles(*roles_to_restore, reason="Retrying role restoration after verification")
-                                except Exception as e:
-                                    logging.error(f"Error retrying role restoration for {member.name}: {e}")
-                        if not success:
-                            logging.error(f"❌ Failed to restore roles for {member.name} after verification retries!")
-                            self.failed_verification_logged[member.id] = True
+                                if attempt < max_retries - 1:  # Don't retry on last attempt
+                                    try:
+                                        await member.add_roles(*roles_to_restore, reason="Retrying role restoration after verification")
+                                        await asyncio.sleep(retry_delay)
+                                    except Exception as e:
+                                        logging.error(f"Error retrying role restoration for {member.name}: {e}")
+                        
+                        # Log the result ONLY ONCE based on final success/failure
+                        if verification_success:
                             await self.log_member_event(
                                 member.guild,
-                                "❌ Verification Role Restoration Failed",
-                                f"{member.mention} did not receive all subscription roles after verification retries. Manual intervention required.",
+                                "✅ Subscription Verification Completed",
+                                f"{member.mention} completed verification - restored: {', '.join(role_names)}",
                                 member,
-                                discord.Color.red(),
+                                discord.Color.green(),
                                 roles_to_restore
                             )
+                            self.total_verified += 1
+                            
+                            # Start post-verification monitoring
+                            asyncio.create_task(self._monitor_post_verification(member, subscription_role_ids))
                         else:
-                            # Only log success if not already failed
+                            # Only log failure if we haven't already logged it
                             if not self.failed_verification_logged.get(member.id, False):
-                                monitor_seconds = 120
-                                print(f"⏳ Monitoring {member.name} for {monitor_seconds} seconds post-verification...")
-                                for _ in range(monitor_seconds // 5):
-                                    await asyncio.sleep(5)
-                                    user_role_ids = {role.id for role in member.roles}
-                                    missing = subscription_role_ids - user_role_ids
-                                    if missing:
-                                        print(f"⚠️ {member.name} lost roles {missing} during monitoring. Re-adding...")
-                                        try:
-                                            to_readd = [member.guild.get_role(rid) for rid in missing if member.guild.get_role(rid)]
-                                            if to_readd:
-                                                await member.add_roles(*to_readd, reason="Re-adding lost roles during post-verification monitoring")
-                                                logging.info(f"Re-added lost roles to {member.name} during monitoring: {to_readd}")
-                                        except Exception as e:
-                                            logging.error(f"Error re-adding lost roles to {member.name} during monitoring: {e}")
-                                print(f"✅ Monitoring complete for {member.name}")
-                                # Log success only if not failed
+                                self.failed_verification_logged[member.id] = True
                                 await self.log_member_event(
                                     member.guild,
-                                    "✅ Subscription Verification Completed",
-                                    f"{member.mention} completed verification - restored: {', '.join(role_names)}",
+                                    "❌ Verification Role Restoration Failed",
+                                    f"{member.mention} did not receive all subscription roles after verification retries. Manual intervention required.",
                                     member,
-                                    discord.Color.green(),
+                                    discord.Color.red(),
                                     roles_to_restore
                                 )
-                                # Increment total_verified and clear failed flag if present
-                                self.total_verified += 1
-                                if member.id in self.failed_verification_logged:
-                                    del self.failed_verification_logged[member.id]
-                            # Clean up the flag after monitoring
-                            if member.id in self.failed_verification_logged:
-                                del self.failed_verification_logged[member.id]
+                                logging.error(f"❌ Failed to restore roles for {member.name} after verification retries!")
                     else:
                         logging.info(f"No valid subscription roles to restore for {member.name}")
                         self.users_awaiting_verification.discard(member.id)
                 else:
                     logging.info(f"No original subscription roles to restore for {member.name}")
                     self.users_awaiting_verification.discard(member.id)
-                del self.member_original_roles[member.id]
+            
+                # Clean up stored data
+                if member.id in self.member_original_roles:
+                    del self.member_original_roles[member.id]
             else:
                 logging.warning(f"No stored subscription roles found for {member.name}")
                 self.users_awaiting_verification.discard(member.id)
+            
             self.users_being_verified.discard(member.id)
             print(f"✅ DEBUG: Completed verification process for {member.name}")
             return restored_roles
+            
         except Exception as e:
             self.users_being_verified.discard(member.id)
             self.users_awaiting_verification.discard(member.id)
             logging.error(f"Error restoring subscription roles for {member.name}: {e}")
             raise
+
+    async def _monitor_post_verification(self, member, expected_role_ids):
+        """Monitor user for 2 minutes after verification to ensure roles stay"""
+        try:
+            monitor_seconds = 120
+            print(f"⏳ Monitoring {member.name} for {monitor_seconds} seconds post-verification...")
+            
+            for _ in range(monitor_seconds // 5):  # Check every 5 seconds
+                await asyncio.sleep(5)
+                
+                try:
+                    # Get fresh member data
+                    fresh_member = await member.guild.fetch_member(member.id)
+                    user_role_ids = {role.id for role in fresh_member.roles}
+                except:
+                    user_role_ids = {role.id for role in member.roles}
+                
+                missing = expected_role_ids - user_role_ids
+                if missing:
+                    print(f"⚠️ {member.name} lost roles {missing} during monitoring. Re-adding...")
+                    try:
+                        to_readd = [member.guild.get_role(rid) for rid in missing if member.guild.get_role(rid)]
+                        if to_readd:
+                            await member.add_roles(*to_readd, reason="Re-adding lost roles during post-verification monitoring")
+                            logging.info(f"Re-added lost roles to {member.name} during monitoring")
+                    except Exception as e:
+                        logging.error(f"Error re-adding lost roles to {member.name} during monitoring: {e}")
+            
+            print(f"✅ Monitoring complete for {member.name}")
+            
+        except Exception as e:
+            logging.error(f"Error in post-verification monitoring for {member.name}: {e}")
 
     async def log_member_event(self, guild, title, description, user, color, roles=None):
         """Log member events to the logs channel"""
@@ -396,6 +535,13 @@ class MemberManagement(commands.Cog):
     @app_commands.describe(user="The user to test with")
     async def test_member_join(self, interaction: discord.Interaction, user: discord.Member):
         """Test the member join functionality manually"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
         await interaction.response.defer(ephemeral=True)
         
         # Create test log embed
@@ -465,17 +611,21 @@ class MemberManagement(commands.Cog):
             await interaction.followup.send(f"❌ Test failed for {user.mention}. Check logs channel for error details.", ephemeral=True)
 
     async def send_to_logs(self, guild, embed):
-        """Helper function to send embeds to logs channel"""
+        """Helper function to send embeds to logs channel with safety checks"""
+        if not guild:
+            print("❌ No guild provided to send_to_logs")
+            return
+        
         logs_channel_id = os.getenv('LOGS_CHANNEL_ID')
         if logs_channel_id:
-            logs_channel = guild.get_channel(int(logs_channel_id))
-            if logs_channel:
-                try:
+            try:
+                logs_channel = guild.get_channel(int(logs_channel_id))
+                if logs_channel:
                     await logs_channel.send(embed=embed)
-                except Exception as e:
-                    print(f"❌ Failed to send to logs channel: {e}")
-            else:
-                print(f"❌ Logs channel not found: {logs_channel_id}")
+                else:
+                    print(f"❌ Logs channel not found: {logs_channel_id}")
+            except Exception as e:
+                print(f"❌ Failed to send to logs channel: {e}")
         else:
             print("❌ LOGS_CHANNEL_ID not set in environment variables")
 
@@ -483,6 +633,13 @@ class MemberManagement(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def check_stored_roles(self, interaction: discord.Interaction):
         """Check how many members have stored subscription roles"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
         count = len(self.member_original_roles)
         monitoring_count = len(self.users_awaiting_verification)
         verifying_count = len(self.users_being_verified)
@@ -499,7 +656,7 @@ class MemberManagement(commands.Cog):
         embed.add_field(name="🛡️ Protection Status", value="Active" if monitoring_count > 0 else "Inactive", inline=True)
         
         if count > 0:
-            # Show some details about pending verifications
+            # Log some details about pending verifications
             pending_users = []
             subscription_roles = {
                 get_env_role_id('LAUNCHPAD_ROLE_ID'): "🚀 VIP ($98/mo),($750/yr), or $1,000 for lifetime access)",
@@ -525,6 +682,7 @@ class MemberManagement(commands.Cog):
                         status_parts.append("⚙️ Verifying")
                     
                     status = " | ".join(status_parts) if status_parts else "⚠️ Not tracked"
+
                     if user is not None:
                         pending_users.append(f"• {user.mention} - {roles_text} ({status})")
                     else:
@@ -572,6 +730,13 @@ class MemberManagement(commands.Cog):
     @app_commands.describe(user="The user to verify (optional)")
     async def force_verify(self, interaction: discord.Interaction, user: Optional[str] = None):
         """Manually verify a user and restore their subscription roles. If no user is provided, suggest pending users."""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
         await interaction.response.defer(ephemeral=True)
         member = None
         if user:
@@ -622,7 +787,7 @@ class MemberManagement(commands.Cog):
                 )
             else:
                 embed = discord.Embed(
-                    title="⚠️ No Roles to Restore",
+                    title="🚫 No Roles to Restore",
                     description=f"{member_mention} has no stored subscription roles to restore.",
                     color=discord.Color.yellow()
                 )
@@ -642,8 +807,15 @@ class MemberManagement(commands.Cog):
     @app_commands.describe(user="The user to check")
     async def debug_roles(self, interaction: discord.Interaction, user: discord.Member):
         """Debug role information for a user"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
         embed = discord.Embed(
-            title=f"🔍 Role Debug for {user.name}",
+            title=f"🔍 User Debug for {user.name}",
             color=discord.Color.blue()
         )
         
@@ -666,7 +838,7 @@ class MemberManagement(commands.Cog):
         stored = self.member_original_roles.get(user.id, [])
         embed.add_field(name="Stored Roles", value=str(stored) if stored else "None", inline=False)
         
-        # Check monitoring status
+        # Check check status
         is_monitored = user.id in self.users_awaiting_verification
         is_verifying = user.id in self.users_being_verified
         embed.add_field(name="Being Monitored", value=str(is_monitored), inline=False)
@@ -678,6 +850,13 @@ class MemberManagement(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def cleanup_tracking(self, interaction: discord.Interaction):
         """Clean up tracking data for users who are no longer in the server"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
         await interaction.response.defer(ephemeral=True)
         
         cleaned_stored = 0
@@ -729,13 +908,20 @@ class MemberManagement(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def help_admin(self, interaction: discord.Interaction):
         """List all admin commands and their descriptions"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
         commands_info = [
             ("/force_verify <user>", "Manually verify a user and restore their subscription roles."),
             ("/remove_verification <user>", "Remove all subscription roles and tracking for a user."),
             ("/pending_verifications", "List all users currently awaiting verification or with failed verifications."),
             ("/retry_verification <user>", "Retry the verification/role restoration process for a user."),
             ("/bot_status", "Show bot uptime, latency, loaded cogs, and environment variable status."),
-            ("/show_logs <count>", "Show the last N log entries (from a file or memory)."),
+            ("/show_logs <count>", "Show the last N log entries (from file or memory)."),
             ("/debug_roles <user>", "Show all roles, expected roles, and tracking status for a user."),
             ("/cleanup_tracking", "Remove tracking for users who have left the server."),
             ("/reset_tracking", "Clear all tracking data (dangerous, admin only)."),

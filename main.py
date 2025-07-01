@@ -1,49 +1,87 @@
 import sys
 import subprocess
-import pkg_resources
+import importlib.metadata  # Replace deprecated pkg_resources
 import logging
 import discord
 from discord.ext import commands
 import asyncio
 from dotenv import load_dotenv
 import os
+from datetime import datetime, timezone
 
 def check_and_install_requirements():
+    """Check and install required packages using modern importlib.metadata"""
     try:
         with open('requirements.txt') as f:
             requirements = [line.strip() for line in f if line.strip()]
         
-        installed = {pkg.key for pkg in pkg_resources.working_set}
-        missing = []
+        # Use importlib.metadata instead of deprecated pkg_resources
+        try:
+            installed = {dist.metadata['name'].lower().replace('-', '_') for dist in importlib.metadata.distributions()}
+        except Exception:
+            # Fallback for older Python versions
+            import pkg_resources
+            installed = {pkg.key for pkg in pkg_resources.working_set}
         
+        missing = []
         for requirement in requirements:
-            pkg_name = requirement.split('>=')[0]
-            if pkg_name.lower() not in installed:
+            pkg_name = requirement.split('>=')[0].lower().replace('-', '_')
+            if pkg_name not in installed:
                 missing.append(requirement)
         
         if missing:
-            print("Installing missing packages...")
-            subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + missing)
-            print("All required packages installed successfully!")
+            print("📦 Installing missing packages...")
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install'] + missing, 
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            print("✅ All required packages installed!")
         else:
-            print("All required packages already installed!")
+            print("✅ All required packages already installed!")
             
     except Exception as e:
-        print(f"Error checking/installing packages: {e}")
+        print(f"❌ Error checking/installing packages: {e}")
         sys.exit(1)
 
 # Run the check at startup
+print("🔍 Checking dependencies...", end=" ")
 check_and_install_requirements()
 
 # Load environment variables
 load_dotenv()
 
-# Set up logging
-logging.basicConfig(
-    filename='bot.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+def setup_logging():
+    """Setup clean, production-ready logging"""
+    # Clear any existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)-15s | %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    
+    # File handler
+    file_handler = logging.FileHandler('bot.log', encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+    
+    # Console handler (minimal output)
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter('%(levelname)-8s | %(message)s'))
+    console_handler.setLevel(logging.ERROR)  # Only errors to console
+    
+    # Setup root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[file_handler, console_handler]
+    )
+    
+    # Reduce discord.py logging noise
+    logging.getLogger('discord').setLevel(logging.ERROR)
+    logging.getLogger('discord.http').setLevel(logging.ERROR)
+    logging.getLogger('discord.gateway').setLevel(logging.ERROR)
+
+setup_logging()
 
 # Set up intents
 intents = discord.Intents.default()
@@ -55,55 +93,53 @@ intents.guild_messages = True
 class BredenBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
+        self.startup_time = datetime.now(timezone.utc)
         
     async def setup_hook(self):
-        print("Loading cogs...")
+        print("🔧 Loading cogs...", end=" ")
         
-        # Load all cogs
-        try:
-            await self.load_extension('cogs.verification')
-            print("✅ Loaded verification cog")
-        except Exception as e:
-            print(f"❌ Failed to load verification cog: {e}")
-            
-        try:
-            await self.load_extension('cogs.member_management')
-            print("✅ Loaded member_management cog")
-        except Exception as e:
-            print(f"❌ Failed to load member_management cog: {e}")
-            
-        try:
-            await self.load_extension('cogs.welcome')
-            print("✅ Loaded welcome cog")
-        except Exception as e:
-            print(f"❌ Failed to load welcome cog: {e}")
+        # Load all cogs with clean output
+        cogs_to_load = [
+            ('cogs.verification', 'Verification'),
+            ('cogs.member_management', 'Member Management'),
+            ('cogs.welcome', 'Welcome')
+        ]
         
-        print("Syncing slash commands...")
+        loaded_count = 0
+        failed_cogs = []
+        
+        for cog_path, cog_name in cogs_to_load:
+            try:
+                await self.load_extension(cog_path)
+                loaded_count += 1
+                logging.info(f"Successfully loaded {cog_name} cog")
+            except Exception as e:
+                failed_cogs.append(cog_name)
+                logging.error(f"Failed to load {cog_name} cog: {e}")
+        
+        if failed_cogs:
+            print(f"⚠️  {loaded_count}/{len(cogs_to_load)} cogs loaded ({len(failed_cogs)} failed)")
+            print(f"   Failed: {', '.join(failed_cogs)}")
+        else:
+            print(f"✅ All {loaded_count} cogs loaded successfully!")
+        
+        print("🔄 Syncing commands...", end=" ")
         
         # Sync commands globally
         try:
             synced = await self.tree.sync()
-            print(f"✅ Synced {len(synced)} slash commands globally")
-            for cmd in synced:
-                print(f"  - /{cmd.name}")
+            print(f"✅ Synced {len(synced)} slash commands")
+            logging.info(f"Synced {len(synced)} slash commands globally")
         except Exception as e:
             print(f"❌ Failed to sync commands: {e}")
+            logging.error(f"Failed to sync commands: {e}")
 
     async def on_ready(self):
-        print(f"🤖 Bot is online as {self.user}")
-        print(f"📊 Connected to {len(self.guilds)} guilds")
+        print(f"\n🤖 {self.user} is now online!")
+        print(f"📊 Connected to {len(self.guilds)} guild(s)")
+        print(f"👥 Serving {sum(guild.member_count or 0 for guild in self.guilds)} members")
         
-        # List all available slash commands
-        print("\n📋 Available slash commands:")
-        for command in self.tree.get_commands():
-            # Some commands (like ContextMenu) may not have a 'description' attribute
-            desc = getattr(command, "description", None)
-            if desc is not None:
-                print(f"  /{command.name} - {desc}")
-            else:
-                print(f"  /{command.name}")
-
-        # Set custom status - DND with "Watching Gates of Server"
+        # Set custom status
         try:
             await self.change_presence(
                 status=discord.Status.dnd,
@@ -116,6 +152,11 @@ class BredenBot(commands.Bot):
         except Exception as e:
             print(f"❌ Failed to set status: {e}")
         
+        # Fixed deprecation warning here
+        current_time = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        print(f"\n🚀 Bot fully initialized at {current_time} UTC")
+        print("=" * 60)
+        
         logging.info(f"Bot started successfully as {self.user}")
 
     async def on_command_error(self, ctx, error):
@@ -125,26 +166,47 @@ class BredenBot(commands.Bot):
         elif isinstance(error, commands.MissingPermissions):
             await ctx.send("❌ You don't have permission to use this command!")
         else:
-            print(f"Command error: {error}")
             logging.error(f"Command error: {error}")
 
-    async def on_application_command_error(self, interaction: discord.Interaction, error):
+    async def on_application_command_error(self, interaction, error):
         """Handle slash command errors"""
+        error_id = f"ERR_{hash(str(error)) % 10000:04d}"
+        
         if isinstance(error, discord.app_commands.MissingPermissions):
-            await interaction.response.send_message("❌ You don't have permission to use this command!", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ You don't have permission to use this command!", 
+                ephemeral=True
+            )
         else:
-            print(f"Slash command error: {error}")
-            logging.error(f"Slash command error: {error}")
-            if not interaction.response.is_done():
-                await interaction.response.send_message("❌ An error occurred while processing this command.", ephemeral=True)
+            logging.error(f"Slash command error [{error_id}]: {error}")
+            
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"❌ An error occurred. Error ID: `{error_id}`", 
+                        ephemeral=True
+                    )
+                else:
+                    await interaction.followup.send(
+                        f"❌ An error occurred. Error ID: `{error_id}`", 
+                        ephemeral=True
+                    )
+            except:
+                pass
 
 # Create bot instance
 bot = BredenBot()
 
-# Add a simple test command to verify slash commands work
+# Add a simple test command
 @bot.tree.command(name="ping", description="Test if the bot is responding")
-async def ping(interaction: discord.Interaction):
-    """Simple ping command to test slash commands"""
+async def ping(interaction):
+    """Simple ping command"""
+    if not interaction.guild:
+        return await interaction.response.send_message(
+            "❌ This command can only be used in a server!", 
+            ephemeral=True
+        )
+    
     latency = round(bot.latency * 1000)
     embed = discord.Embed(
         title="🏓 Pong!",
@@ -153,11 +215,23 @@ async def ping(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# Add this to main.py after the ping command
 @bot.tree.command(name="debug", description="Debug information for admins")
 @discord.app_commands.default_permissions(administrator=True)
-async def debug(interaction: discord.Interaction):
+async def debug(interaction):
     """Debug command to check bot status"""
+    if not interaction.guild:
+        return await interaction.response.send_message(
+            "❌ This command can only be used in a server!", 
+            ephemeral=True
+        )
+    
+    # Check admin permissions
+    if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "❌ You need Administrator permissions to use this command!",
+            ephemeral=True
+        )
+    
     embed = discord.Embed(
         title="🔧 Debug Information",
         color=discord.Color.blue()
@@ -165,7 +239,8 @@ async def debug(interaction: discord.Interaction):
     
     # Check cogs
     cogs_status = []
-    for cog_name in ['Verification', 'MemberManagement', 'Welcome']:
+    expected_cogs = ['Verification', 'MemberManagement', 'Welcome']
+    for cog_name in expected_cogs:
         cog = bot.get_cog(cog_name)
         status = "✅ Loaded" if cog else "❌ Not loaded"
         cogs_status.append(f"{cog_name}: {status}")
@@ -174,28 +249,53 @@ async def debug(interaction: discord.Interaction):
     
     # Check commands
     commands = [cmd.name for cmd in bot.tree.get_commands()]
-    embed.add_field(name="Slash Commands", value=", ".join(commands) if commands else "None", inline=False)
+    embed.add_field(
+        name="Slash Commands", 
+        value=f"{len(commands)} commands loaded", 
+        inline=False
+    )
     
-    # Check environment variables
+    # Check environment variables (safely)
     env_vars = []
-    for var in ['GUILD_ID', 'WELCOME_CHANNEL_ID', 'LAUNCHPAD_ROLE_ID', 'MEMBER_ROLE_ID']:
+    required_vars = ['GUILD_ID', 'WELCOME_CHANNEL_ID', 'LAUNCHPAD_ROLE_ID', 'MEMBER_ROLE_ID', 'LOGS_CHANNEL_ID']
+    for var in required_vars:
         value = os.getenv(var)
         status = "✅ Set" if value else "❌ Missing"
         env_vars.append(f"{var}: {status}")
     
     embed.add_field(name="Environment Variables", value="\n".join(env_vars), inline=False)
     
+    # Bot stats
+    uptime = datetime.now(timezone.utc) - bot.startup_time
+    embed.add_field(
+        name="Bot Stats", 
+        value=f"Uptime: {str(uptime).split('.')[0]}\nLatency: {round(bot.latency * 1000)}ms", 
+        inline=False
+    )
+    
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 if __name__ == "__main__":
-    print("🚀 Starting Brendan Verification Bot...")
+    print("🚀 Starting Breden Verification Bot...")
+    print("=" * 60)
+    
     token = os.getenv('TOKEN')
     if not token:
-        print("❌ Failed to start bot: TOKEN environment variable is not set.")
-        logging.error("Failed to start bot: TOKEN environment variable is not set.")
-    else:
-        try:
-            bot.run(token)
-        except Exception as e:
-            print(f"❌ Failed to start bot: {e}")
-            logging.error(f"Failed to start bot: {e}")
+        print("❌ CRITICAL ERROR: TOKEN environment variable is not set!")
+        print("   Please check your .env file and ensure TOKEN is properly configured.")
+        logging.error("Bot startup failed: TOKEN environment variable missing")
+        input("Press Enter to exit...")
+        sys.exit(1)
+    
+    try:
+        bot.run(token, log_handler=None)  # Disable discord.py's default logging
+    except discord.LoginFailure:
+        print("❌ CRITICAL ERROR: Invalid bot token!")
+        print("   Please check your TOKEN in the .env file.")
+        logging.error("Bot startup failed: Invalid token")
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: Failed to start bot: {e}")
+        logging.error(f"Bot startup failed: {e}")
+    finally:
+        print("\n👋 Bot shutdown complete.")
+        input("Press Enter to exit...")

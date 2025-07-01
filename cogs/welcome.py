@@ -24,7 +24,9 @@ class Welcome(commands.Cog):
                 return
                 
             welcome_channel_id = os.getenv('WELCOME_CHANNEL_ID')
-            welcome_channel = self.bot.get_channel(int(welcome_channel_id)) if welcome_channel_id and hasattr(self.bot, 'get_channel') else None
+            # Direct conversion without validation
+            welcome_channel = self.bot.get_channel(int(welcome_channel_id))
+            # Could crash if ID is invalid
             if not welcome_channel:
                 logging.error(f"Welcome channel with ID {welcome_channel_id} not found")
                 return
