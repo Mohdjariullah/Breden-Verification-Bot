@@ -240,26 +240,9 @@ class MemberManagement(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before, after):
-        """Monitor role changes and track who/what assigns roles"""
+        """Monitor role changes and prevent OTHER BOTS from re-adding roles to unverified users"""
         try:
-            # Check for role changes
-            before_role_ids = {role.id for role in before.roles}
-            after_role_ids = {role.id for role in after.roles}
-            
-            added_roles = after_role_ids - before_role_ids
-            removed_roles = before_role_ids - after_role_ids
-            
-            # Define subscription roles
-            subscription_roles = {
-                get_env_role_id('LAUNCHPAD_ROLE_ID'),
-                get_env_role_id('MEMBER_ROLE_ID')
-            }
-            
-            # NEW: Enhanced role assignment tracking
-            if added_roles or removed_roles:
-                await self.track_role_changes(before, after, added_roles, removed_roles, subscription_roles)
-            
-            # Skip monitoring logic if user is not being monitored
+            # Skip if user is not being monitored
             if after.id not in self.users_awaiting_verification:
                 return
             
@@ -268,38 +251,74 @@ class MemberManagement(commands.Cog):
                 print(f"🔄 DEBUG: Skipping role check for {after.name} - currently being verified")
                 return
             
+            # NEW: Check if OUR bot made the role change (prevent self-fighting)
+            try:
+                async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_role_update):
+                    if entry.target and entry.target.id == after.id:
+                        # If OUR bot made the change, ignore it completely
+                        if entry.user and entry.user.id == self.bot.user.id:
+                            print(f"🤖 DEBUG: Ignoring role change made by our own bot for {after.name}")
+                            return
+                        break
+            except Exception as e:
+                print(f"⚠️ Could not check audit logs: {e}")
+            
+            # Define subscription roles
+            subscription_roles = {
+                get_env_role_id('LAUNCHPAD_ROLE_ID'),
+                get_env_role_id('MEMBER_ROLE_ID')
+            }
+            
+            # Check if any subscription roles were added by EXTERNAL sources
+            before_role_ids = {role.id for role in before.roles}
+            after_role_ids = {role.id for role in after.roles}
+            
             # Find newly added subscription roles
+            added_roles = after_role_ids - before_role_ids
             added_subscription_roles = added_roles & subscription_roles
             
             if added_subscription_roles:
-                print(f"🚨 DEBUG: Unauthorized role addition detected for {after.name}! Removing...")
-                
+                print(f"🚨 DEBUG: EXTERNAL bot re-added roles to {after.name}! Removing again...")
+            
                 # Get the role objects to remove
                 roles_to_remove = []
                 for role_id in added_subscription_roles:
                     role = after.guild.get_role(role_id) if after.guild else None
                     if role:
                         roles_to_remove.append(role)
-                
+            
                 if roles_to_remove:
-                    # Remove the roles again
-                    await after.remove_roles(*roles_to_remove, reason="User awaiting verification - unauthorized role assignment blocked")
-                    
+                    # Remove the roles again (DO NOT remove from monitoring here!)
+                    await after.remove_roles(*roles_to_remove, reason="User awaiting verification - external bot interference")
+                
                     role_names = [role.name for role in roles_to_remove]
                     print(f"✅ DEBUG: Re-removed roles from {after.name}: {role_names}")
                     print(f"🔍 DEBUG: User {after.name} still being monitored")
-                    logging.info(f"Blocked unauthorized role assignment to {after.name}: {role_names}")
-                    
-                    # Enhanced logging with source detection
+                    logging.info(f"Re-removed subscription roles from {after.name} (external bot interference): {role_names}")
+                
+                    # Get the source of the role change
+                    role_source = "Unknown Bot"
+                    try:
+                        async for entry in after.guild.audit_logs(limit=1, action=discord.AuditLogAction.member_role_update):
+                            if entry.target and entry.target.id == after.id and entry.user:
+                                if entry.user.bot:
+                                    role_source = f"Bot: {entry.user.name} ({entry.user.id})"
+                                else:
+                                    role_source = f"User: {entry.user.name}"
+                                break
+                    except:
+                        pass
+                
+                    # Log the interference
                     await self.log_member_event(
                         after.guild,
-                        "🛡️ Unauthorized Role Assignment Blocked",
-                        f"Blocked role assignment to {after.mention} (awaiting verification): {', '.join(role_names)}",
+                        "🔄 Role Re-Removal",
+                        f"External bot re-added roles to {after.mention} - removed again (awaiting verification)\nSource: {role_source}",
                         after,
-                        discord.Color.red(),
+                        discord.Color.yellow(),
                         roles_to_remove
                     )
-                    
+                
         except Exception as e:
             print(f"❌ DEBUG: Error in on_member_update: {e}")
             logging.error(f"Error in on_member_update for {after.name}: {e}")
