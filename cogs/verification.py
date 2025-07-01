@@ -74,46 +74,26 @@ class VerificationView(View):
                 ephemeral=True
             )
 
-        # Prevent duplicate tickets
+        # FIXED: Better duplicate ticket prevention
         ticket_name = f"verify-{interaction.user.name.lower()}"
-        existing = discord.utils.get(getattr(interaction.guild, 'channels', []), name=ticket_name)
-        if existing:
-            close_ts = int((datetime.now(timezone.utc) + timedelta(seconds=20)).timestamp())
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="🎫 Active Ticket Found",
-                    description=(
-                        f"You already have an active verification ticket: {existing.mention}\n"
-                        f"This message will auto-close <t:{close_ts}:R>"
-                    ),
-                    color=discord.Color.yellow()
-                ),
-                ephemeral=True
-            )
-            # Schedule deletion in 20s
-            await asyncio.sleep(20)
-            try:
-                await existing.delete()
-                logging.info(f"Deleted duplicate ticket for {interaction.user}")
-            except Exception as e:
-                logging.warning(f"Could not delete duplicate ticket: {e}")
-            return
-
-        # Create the ticket channel under same category
-        category = getattr(getattr(interaction.channel, 'category', None), 'id', None)
-        ticket_channel = None
-        if hasattr(interaction.guild, 'create_text_channel') and interaction.guild is not None:
-            try:
-                ticket_channel = await interaction.guild.create_text_channel(
-                    name=ticket_name,
-                    category=getattr(interaction.channel, 'category', None) if category else None
-                )
-            except Exception as e:
-                await interaction.followup.send(f'❌ Failed to create ticket channel: {e}', ephemeral=True)
-                return
-        else:
-            await interaction.followup.send('❌ Guild context missing. Please try again in a server.', ephemeral=True)
-            return
+        existing_tickets = []
+        
+        # Find ALL existing tickets for this user
+        for channel in interaction.guild.channels:
+            if isinstance(channel, discord.TextChannel) and channel.name.startswith(f"verify-{interaction.user.name.lower()}"):
+                existing_tickets.append(channel)
+        
+        if existing_tickets:
+            # Delete all existing tickets first
+            for ticket in existing_tickets:
+                try:
+                    await ticket.delete(reason=f"Cleaning up duplicate tickets for {interaction.user.name}")
+                    logging.info(f"Deleted existing ticket: {ticket.name}")
+                except Exception as e:
+                    logging.error(f"Failed to delete existing ticket {ticket.name}: {e}")
+            
+            # Small delay to ensure deletion completes
+            await asyncio.sleep(2)
 
         # Create ticket channel with proper permissions from the start
         overwrites = {
@@ -200,7 +180,7 @@ class VerificationView(View):
         await ticket_channel.send(
             f"Welcome {interaction.user.mention}! Let's verify your subscription access.",
             embed=embed,
-            view=ConfirmBookingView(interaction.user)
+            view=ConfirmBookingView(interaction.user, ticket_channel.id)  # Pass channel ID
         )
 
         # Log verification start
@@ -256,10 +236,10 @@ class VerificationView(View):
                 # Delete the ticket channel
                 if ticket_channel and hasattr(ticket_channel, 'delete'):
                     try:
-                        await asyncio.sleep(5)
                         await ticket_channel.delete()
+                        logging.info(f"Auto-deleted expired ticket for {interaction.user.name}")
                     except Exception as e:
-                        logging.error(f'Failed to delete ticket channel: {e}')
+                        logging.error(f'Failed to delete expired ticket channel: {e}')
                 
                 # Log the auto-close
                 await self.log_verification_event(
@@ -269,7 +249,6 @@ class VerificationView(View):
                     interaction.user,
                     discord.Color.orange()
                 )
-                logging.info(f"Auto-closed verification ticket for {interaction.user}")
                 
             except Exception as e:
                 logging.error(f"Error in auto-close for {interaction.user.name}: {e}")
@@ -309,9 +288,10 @@ class VerificationView(View):
                     logging.error(f"Failed to send log message: {e}")
 
 class ConfirmBookingView(discord.ui.View):
-    def __init__(self, authorized_user):
+    def __init__(self, authorized_user, ticket_channel_id):
         super().__init__(timeout=None)
         self.authorized_user = authorized_user
+        self.ticket_channel_id = ticket_channel_id
 
     @discord.ui.button(label="I Have Booked", style=discord.ButtonStyle.green, emoji="✅")
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -351,16 +331,12 @@ class ConfirmBookingView(discord.ui.View):
                 
                 if restored_roles and not missing_roles:
                     role_names = [role.name for role in restored_roles]
-                    # # Log successful verification
-                    # await self.log_verification_event(
-                    #     interaction.guild,
-                    #     "✅ Subscription Verification Completed",
-                    #     f"{interaction.user.mention} completed verification - restored: {', '.join(role_names)}",
-                    #     interaction.user,
-                    #     discord.Color.green(),
-                    #     restored_roles
-                    # )
-                    await interaction.followup.send(f"✅ Verification complete! Your subscription roles have been restored: {', '.join(role_names)}\n\nWe will continue to monitor your access for a short period to ensure no other bot removes your roles.", ephemeral=True)
+                    await interaction.followup.send(
+                        f"✅ Verification complete! Your subscription roles have been restored: {', '.join(role_names)}\n\n"
+                        "We will continue to monitor your access for a short period to ensure no other bot removes your roles.", 
+                        ephemeral=True
+                    )
+                    
                     # Schedule a DM after 20 seconds to congratulate the user
                     async def send_verified_dm():
                         await asyncio.sleep(20)
@@ -458,9 +434,20 @@ class Verification(commands.Cog):
 
     @app_commands.command(name="setup_logs", description="Set a channel as verification logs channel")
     @app_commands.default_permissions(administrator=True)
-    @security_check(require_guild=True, require_admin=True)
     async def setup_logs(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """Set a channel as verification logs channel"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ This command can only be used in a server, not in DMs!",
+                ephemeral=True
+            )
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ You need Administrator permissions to use this command!",
+                ephemeral=True
+            )
         
         # Validate channel permissions
         if not channel.permissions_for(interaction.guild.me).send_messages:
@@ -506,9 +493,20 @@ class Verification(commands.Cog):
 
     @app_commands.command(name="set_booking_link", description="Set the booking link for verification")
     @app_commands.default_permissions(administrator=True)
-    @security_check(require_guild=True, require_admin=True)
     async def set_booking_link(self, interaction: discord.Interaction, url: str):
         """Set the booking link for verification"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ This command can only be used in a server, not in DMs!",
+                ephemeral=True
+            )
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ You need Administrator permissions to use this command!",
+                ephemeral=True
+            )
         
         # Basic URL validation
         if not url.startswith(('http://', 'https://')):
@@ -525,9 +523,21 @@ class Verification(commands.Cog):
 
     @app_commands.command(name="reload_cogs", description="Reload all bot cogs")
     @app_commands.default_permissions(administrator=True)
-    @security_check(require_guild=True, require_admin=True)
     async def reload_cogs(self, interaction: discord.Interaction):
         """Reload all bot cogs"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ This command can only be used in a server, not in DMs!",
+                ephemeral=True
+            )
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ You need Administrator permissions to use this command!",
+                ephemeral=True
+            )
+        
         await interaction.response.defer(ephemeral=True)
         
         cogs = ["cogs.verification", "cogs.member_management", "cogs.welcome"]
@@ -546,9 +556,21 @@ class Verification(commands.Cog):
 
     @app_commands.command(name="verification_stats", description="Show verification statistics")
     @app_commands.default_permissions(administrator=True)
-    @security_check(require_guild=True, require_admin=True)
     async def verification_stats(self, interaction: discord.Interaction):
         """Show verification statistics"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ This command can only be used in a server, not in DMs!",
+                ephemeral=True
+            )
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ You need Administrator permissions to use this command!",
+                ephemeral=True
+            )
+        
         member_cog = self.bot.get_cog('MemberManagement')
         if not member_cog:
             await interaction.response.send_message("❌ MemberManagement cog not loaded.", ephemeral=True)

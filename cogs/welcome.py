@@ -69,7 +69,19 @@ class Welcome(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def setup_permissions(self, interaction: discord.Interaction):
         """Setup channel permissions for verification system with double confirmation and backup"""
-
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ This command can only be used in a server, not in DMs!",
+                ephemeral=True
+            )
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ You need Administrator permissions to use this command!",
+                ephemeral=True
+            )
+        
         # First confirmation embed
         first_confirm_embed = discord.Embed(
             title="⚠️ DANGEROUS OPERATION - First Confirmation",
@@ -397,6 +409,19 @@ class Welcome(commands.Cog):
     @app_commands.default_permissions(administrator=True)
     async def refresh_welcome(self, interaction: discord.Interaction):
         """Manually refresh the welcome message"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "❌ This command can only be used in a server, not in DMs!",
+                ephemeral=True
+            )
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message(
+                "❌ You need Administrator permissions to use this command!",
+                ephemeral=True
+            )
+        
         await interaction.response.defer(ephemeral=True)
         
         try:
