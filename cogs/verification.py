@@ -115,18 +115,58 @@ class VerificationView(View):
             await interaction.followup.send('❌ Guild context missing. Please try again in a server.', ephemeral=True)
             return
 
-        # Lock it down: only the user can see/send
-        if not isinstance(interaction.user, discord.Member):
-            await interaction.followup.send('❌ You must be a server member to use this feature.', ephemeral=True)
+        # Create ticket channel with proper permissions from the start
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(
+                view_channel=False,
+                read_messages=False,
+                send_messages=False
+            ),
+            interaction.user: discord.PermissionOverwrite(
+                view_channel=True,
+                read_messages=True,
+                read_message_history=True,  # KEY: Allow reading message history
+                send_messages=True,
+                attach_files=True,
+                embed_links=True,
+                use_external_emojis=True
+            ),
+            interaction.guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                read_messages=True,
+                read_message_history=True,
+                send_messages=True,
+                manage_messages=True,
+                embed_links=True,
+                attach_files=True,
+                manage_channels=True
+            )
+        }
+
+        # Add permissions for administrators
+        for role in interaction.guild.roles:
+            if role.permissions.administrator:
+                overwrites[role] = discord.PermissionOverwrite(
+                    view_channel=True,
+                    read_messages=True,
+                    read_message_history=True,
+                    send_messages=True,
+                    manage_messages=True
+                )
+
+        try:
+            ticket_channel = await interaction.guild.create_text_channel(
+                name=ticket_name,
+                overwrites=overwrites,
+                category=getattr(interaction.channel, 'category', None),
+                topic=f"🎫 Verification ticket for {interaction.user.display_name} | User ID: {interaction.user.id}",
+                reason=f"Verification ticket created for {interaction.user.name}"
+            )
+            logging.info(f"Created verification ticket: {ticket_channel.name} for {interaction.user.name}")
+        except Exception as e:
+            await interaction.followup.send(f'❌ Failed to create ticket channel: {e}', ephemeral=True)
+            logging.error(f"Failed to create ticket channel for {interaction.user.name}: {e}")
             return
-        if ticket_channel and hasattr(ticket_channel, 'set_permissions'):
-            try:
-                await ticket_channel.set_permissions(interaction.user, read_messages=True, send_messages=True)
-                if hasattr(interaction.guild, 'default_role') and interaction.guild.default_role is not None:
-                    await ticket_channel.set_permissions(interaction.guild.default_role, read_messages=False)
-            except Exception as e:
-                await interaction.followup.send(f'❌ Failed to set permissions: {e}', ephemeral=True)
-                return
 
         # Get user's subscription info
         stored_role_ids = member_cog.member_original_roles[interaction.user.id]
