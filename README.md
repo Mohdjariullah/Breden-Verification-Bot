@@ -1,6 +1,6 @@
-# Breden Verification Bot
+# AIdaptics Whop Gatekeeper
 
-A comprehensive Discord verification system with Whop integration, designed for subscription-based communities requiring member verification through scheduled calls. MADE BY AIDAPTICS
+A comprehensive Discord verification system with Whop integration, designed for subscription-based communities requiring member verification through scheduled calls. Built by AIdaptics.
 
 ## 🚀 Features
 
@@ -21,6 +21,11 @@ A comprehensive Discord verification system with Whop integration, designed for 
 - **Debug Commands**: Advanced troubleshooting tools for administrators
 - **Manual Verification**: Force verify users when needed
 - **Status Monitoring**: Real-time tracking of pending verifications
+- **Strict Admin-Only Controls**: All sensitive commands (including bypass management) are strictly admin-only, protected by Discord permissions and runtime checks
+
+### Ticket System Improvements
+- **One Ticket Per User**: Only one verification ticket can exist per user at a time; duplicate ticket creation is prevented
+- **Button Cooldown**: The verification button enforces a cooldown to prevent spam or race conditions
 
 ## 🛠️ Technical Architecture
 
@@ -118,7 +123,8 @@ LOGS_CHANNEL_ID=logging_channel_id
 - **Data Integrity**: Maintains consistent user state
 
 ### Access Control
-- **Admin-Only Commands**: Sensitive operations restricted to administrators
+- **Admin-Only Commands**: Sensitive operations restricted to administrators (bypass commands, force verify, cleanup, etc.)
+- **Double Protection**: All admin commands are protected by both Discord permissions and explicit runtime checks
 - **Permission Validation**: Verifies bot permissions before operations
 - **Error Recovery**: Graceful handling of permission errors
 
@@ -129,45 +135,7 @@ LOGS_CHANNEL_ID=logging_channel_id
 - **Roles Not Restoring**: Check role hierarchy and bot position
 - **Monitoring Not Working**: Verify environment variables are correct
 - **Commands Not Appearing**: Run bot restart to sync slash commands
+- **Duplicate Tickets**: Only one verification ticket is allowed per user; if you try to create another, you'll be linked to your existing ticket
 
 ### Debug Tools
-- Use `/debug_roles <user>` to check user role status
-- Use `/check_stored_roles` to view system state
-- Check console logs for detailed debugging information
-- Use `/cleanup_tracking` to resolve data inconsistencies
-
-## 📈 Performance
-
-### Optimizations
-- **Efficient Role Lookups**: Fast set-based role checking
-- **Minimal API Calls**: Optimized Discord API usage
-- **Memory Management**: Automatic cleanup of unused data
-- **Async Operations**: Non-blocking concurrent processing
-
-### Scalability
-- **Large Server Support**: Handles thousands of concurrent users
-- **Resource Efficient**: Low memory and CPU usage
-- **Rate Limit Handling**: Respects Discord API limits
-- **Error Recovery**: Continues operation despite temporary failures
-
-## 🔄 Updates & Maintenance
-
-### Regular Maintenance
-- Monitor logs for unusual activity
-- Run `/cleanup_tracking` periodically
-- Update environment variables as needed
-- Restart bot for optimal performance
-
-### Version Updates
-- Backup configuration before updates
-- Test in development environment first
-- Monitor logs after deployment
-- Verify all features working correctly
-
-## 📞 Support
-
-For technical support or feature requests, contact the development team. Include relevant logs and error messages for faster resolution.
-
----
-
-**Built for professional Discord communities requiring robust verification systems.**
+- Use `/debug_roles <user>`

@@ -90,7 +90,7 @@ intents.message_content = True
 intents.guilds = True
 intents.guild_messages = True
 
-class BredenBot(commands.Bot):
+class AIdapticsWhopGatekeeper(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix='!', intents=intents)
         self.startup_time = datetime.now(timezone.utc)
@@ -195,7 +195,7 @@ class BredenBot(commands.Bot):
                 pass
 
 # Create bot instance
-bot = BredenBot()
+bot = AIdapticsWhopGatekeeper()
 
 # Add a simple test command
 @bot.tree.command(name="ping", description="Test if the bot is responding")
@@ -276,7 +276,7 @@ async def debug(interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 if __name__ == "__main__":
-    print("🚀 Starting Breden Verification Bot...")
+    print("🚀 Starting AIdaptics Whop Gatekeeper...")
     print("=" * 60)
     
     token = os.getenv('TOKEN')
