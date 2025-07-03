@@ -1,0 +1,14 @@
+{
+  "member_original_roles": {},
+  "users_awaiting_verification": [],
+  "users_being_verified": [],
+  "user_ticket_channels": {
+    "1171865103780556883": 1390404584358416534
+  },
+  "verification_funnel": {
+    "1171865103780556883": {
+      "joined": "2025-07-03T18:51:23.924666+00:00",
+      "verified": "2025-07-03T18:51:39.198977+00:00"
+    }
+  }
+}

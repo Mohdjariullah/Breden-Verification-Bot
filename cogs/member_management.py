@@ -12,6 +12,8 @@ from .security_utils import (
     SecureLogger, sanitize_log_message
 )
 from .bypass_manager import bypass_manager
+from discord.ui import View, Button
+import json
 
 def get_env_role_id(var_name):
     env_value = os.getenv(var_name)
@@ -36,6 +38,9 @@ class MemberManagement(commands.Cog):
         self._role_lock = asyncio.Lock()
         # Track user to ticket channel mapping
         self.user_ticket_channels: Dict[int, int] = {}
+        self.verification_funnel: Dict[int, Dict[str, datetime]] = {}
+        self.state_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'verification_state.json'))
+        self.load_state()
         SecureLogger.info("MemberManagement cog initialized with production security and bypass system")
 
     @commands.Cog.listener()
@@ -194,6 +199,10 @@ class MemberManagement(commands.Cog):
                         discord.Color.blue()
                     )
                 
+                # Funnel analytics: log join
+                self.verification_funnel.setdefault(member.id, {})['joined'] = datetime.now(timezone.utc)
+                
+                self.save_state()
             except Exception as e:
                 print(f"❌ DEBUG: Error in on_member_join: {e}")
                 logging.error(f"Error in on_member_join for {member.name}: {e}")
@@ -294,6 +303,11 @@ class MemberManagement(commands.Cog):
                 )
 
                 logging.info(f"Untracked user {member.name} ({member.id}) left the server")
+
+            # Funnel analytics: log dropped_off
+            self.verification_funnel.setdefault(member.id, {})['dropped_off'] = datetime.now(timezone.utc)
+            
+            self.save_state()
         except Exception as e:
             print(f"❌ DEBUG: Error in on_member_remove: {e}")
             logging.error(f"Error in on_member_remove for {member.name}: {e}")
@@ -514,6 +528,8 @@ class MemberManagement(commands.Cog):
                             
                             # Start post-verification monitoring
                             asyncio.create_task(self._monitor_post_verification(member, subscription_role_ids))
+                            # Funnel analytics: log verified
+                            self.verification_funnel.setdefault(member.id, {})['verified'] = datetime.now(timezone.utc)
                         else:
                             # Only log failure if we haven't already logged it
                             if not self.failed_verification_logged.get(member.id, False):
@@ -543,6 +559,7 @@ class MemberManagement(commands.Cog):
             
             self.users_being_verified.discard(member.id)
             print(f"✅ DEBUG: Completed verification process for {member.name}")
+            self.save_state()
             return restored_roles
             
         except Exception as e:
@@ -719,73 +736,19 @@ class MemberManagement(commands.Cog):
         else:
             print("❌ LOGS_CHANNEL_ID not set in environment variables")
 
-    @app_commands.command(name="check_stored_roles", description="Check how many members have stored subscription roles")
+    @app_commands.command(name="check_stored_roles", description="Check how many members have stored subscription roles (interactive)")
     @app_commands.default_permissions(administrator=True)
     async def check_stored_roles(self, interaction: discord.Interaction):
-        """Check how many members have stored subscription roles"""
-        # SECURITY: Block DMs and check admin permissions
         if not interaction.guild:
             return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
-        
         if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
-        
-        count = len(self.member_original_roles)
-        monitoring_count = len(self.users_awaiting_verification)
-        verifying_count = len(self.users_being_verified)
-        
-        embed = discord.Embed(
-            title="📊 Pending Verifications",
-            description=f"Currently tracking subscription roles for **{count}** members awaiting verification.",
-            color=discord.Color.blue()
-        )
-        
-        embed.add_field(name="👥 Users Awaiting Verification", value=str(count), inline=True)
-        embed.add_field(name="🔍 Users Being Monitored", value=str(monitoring_count), inline=True)
-        embed.add_field(name="⚙️ Users Being Verified", value=str(verifying_count), inline=True)
-        embed.add_field(name="🛡️ Protection Status", value="Active" if monitoring_count > 0 else "Inactive", inline=True)
-        
-        if count > 0:
-            # Log some details about pending verifications
-            pending_users = []
-            subscription_roles = {
-                get_env_role_id('LAUNCHPAD_ROLE_ID'): "🚀 VIP ($98/mo),($750/yr), or $1,000 for lifetime access)",
-                get_env_role_id('MEMBER_ROLE_ID'): "👤 Member (Free)"
-            }
-            
-            if interaction.guild is not None:
-                for user_id in list(self.member_original_roles.keys())[:5]:  # Show first 5
-                    user = interaction.guild.get_member(user_id)
-                    if user:
-                        user_roles = []
-                        for role_id in self.member_original_roles[user_id]:
-                            role_name = subscription_roles.get(role_id, f"Role ID: {role_id}")
-                        user_roles.append(role_name)
-                    
-                    roles_text = ", ".join(user_roles) if user_roles else "Unknown"
-                    
-                    # Status indicators
-                    status_parts = []
-                    if user_id in self.users_awaiting_verification:
-                        status_parts.append("🔍 Monitored")
-                    if user_id in self.users_being_verified:
-                        status_parts.append("⚙️ Verifying")
-                    
-                    status = " | ".join(status_parts) if status_parts else "⚠️ Not tracked"
-
-                    if user is not None:
-                        pending_users.append(f"• {user.mention} - {roles_text} ({status})")
-                    else:
-                        pending_users.append(f"• [User Left] (ID: {user_id}) - {roles_text} ({status})")
-            
-            if pending_users:
-                embed.add_field(
-                    name="Recent Pending Verifications",
-                    value="\n".join(pending_users) + (f"\n... and {count - len(pending_users)} more" if count > 5 else ""),
-                    inline=False
-                )
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        pending_users = self.get_pending_verification_users(interaction.guild)
+        if not pending_users:
+            return await interaction.response.send_message("✅ No users are currently pending verification!", ephemeral=True)
+        view = StoredRolesView(self, interaction.guild, pending_users)
+        embed = self.make_stored_roles_embed(interaction.guild, pending_users, 0, 5)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     def get_pending_verification_users(self, guild):
         # Return a list of discord.Member objects for users who have not completed verification
@@ -943,44 +906,39 @@ class MemberManagement(commands.Cog):
         # SECURITY: Block DMs and check admin permissions
         if not interaction.guild:
             return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
-        
         if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
-        
+
         await interaction.response.defer(ephemeral=True)
-        
+        guild = interaction.guild
         cleaned_stored = 0
         cleaned_monitoring = 0
         cleaned_verifying = 0
-        
-        # Get the guild object robustly
-        guild = interaction.guild
-        if guild is None and hasattr(self.bot, 'get_guild'):
-            guild_id = os.getenv('GUILD_ID')
-            if guild_id:
-                guild = self.bot.get_guild(int(guild_id))
-        
+        cleaned_tickets = 0
         # Clean stored roles for users not in server
         for user_id in list(self.member_original_roles.keys()):
-            member = guild.get_member(user_id) if guild and hasattr(guild, 'get_member') else None
+            member = guild.get_member(user_id)
             if not member:
                 del self.member_original_roles[user_id]
                 cleaned_stored += 1
-        
         # Clean monitoring list
         for user_id in list(self.users_awaiting_verification):
-            member = guild.get_member(user_id) if guild and hasattr(guild, 'get_member') else None
+            member = guild.get_member(user_id)
             if not member:
                 self.users_awaiting_verification.discard(user_id)
                 cleaned_monitoring += 1
-        
         # Clean verifying list
         for user_id in list(self.users_being_verified):
-            member = guild.get_member(user_id) if guild and hasattr(guild, 'get_member') else None
+            member = guild.get_member(user_id)
             if not member:
                 self.users_being_verified.discard(user_id)
                 cleaned_verifying += 1
-        
+        # Clean ticket channels mapping
+        for user_id in list(self.user_ticket_channels.keys()):
+            member = guild.get_member(user_id)
+            if not member:
+                self.user_ticket_channels.pop(user_id, None)
+                cleaned_tickets += 1
         embed = discord.Embed(
             title="🧹 Cleanup Complete",
             description="Removed tracking data for users who left the server.",
@@ -989,7 +947,7 @@ class MemberManagement(commands.Cog):
         embed.add_field(name="Stored Roles Cleaned", value=str(cleaned_stored), inline=True)
         embed.add_field(name="Monitoring Cleaned", value=str(cleaned_monitoring), inline=True)
         embed.add_field(name="Verifying Cleaned", value=str(cleaned_verifying), inline=True)
-        
+        embed.add_field(name="Ticket Mappings Cleaned", value=str(cleaned_tickets), inline=True)
         await interaction.followup.send(embed=embed, ephemeral=True)
         log_embed = discord.Embed(title="Admin Command Used", description=f"/cleanup_tracking used by {interaction.user.mention}", color=discord.Color.purple())
         await self.send_to_logs(interaction.guild, log_embed)
@@ -1185,9 +1143,260 @@ class MemberManagement(commands.Cog):
     # --- Ticket registration helpers ---
     def register_ticket(self, user_id: int, channel_id: int):
         self.user_ticket_channels[user_id] = channel_id
+        self.save_state()
 
     def unregister_ticket(self, user_id: int):
         self.user_ticket_channels.pop(user_id, None)
+        self.save_state()
+
+    async def cog_load(self):
+        # Called when cog is loaded (discord.py 2.0+)
+        await self.scan_existing_members()
+        self.periodic_monitor_task = self.bot.loop.create_task(self.periodic_monitor())
+
+    async def scan_existing_members(self, guild=None, interaction=None):
+        """Scan all members in the guild and ensure proper tracking."""
+        if guild is None:
+            # Try to get the main guild
+            guild_id = os.getenv('GUILD_ID')
+            if guild_id:
+                guild = self.bot.get_guild(int(guild_id))
+            if not guild and interaction and interaction.guild:
+                guild = interaction.guild
+        if not guild:
+            if interaction:
+                await interaction.response.send_message("❌ Guild not found for scan.", ephemeral=True)
+            return
+        launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
+        member_role_id = get_env_role_id('MEMBER_ROLE_ID')
+        subscription_roles = {launchpad_role_id, member_role_id}
+        given_member_role = 0
+        for member in guild.members:
+            if member.bot:
+                continue
+            user_role_ids = {role.id for role in member.roles if role != guild.default_role}
+            has_subscription = user_role_ids & subscription_roles
+            is_tracked = member.id in self.member_original_roles
+            # Only give Member (free) role if user has neither subscription nor is tracked
+            if not has_subscription and not is_tracked:
+                if member_role_id and member_role_id not in user_role_ids:
+                    role = guild.get_role(member_role_id)
+                    if role:
+                        try:
+                            await member.add_roles(role, reason="Auto-grant Member (free) role to untracked user")
+                            given_member_role += 1
+                        except Exception as e:
+                            logging.error(f"Failed to add Member role to {member.name}: {e}")
+        if interaction:
+            await interaction.response.send_message(f"✅ Scan complete. Gave Member role to {given_member_role} users.", ephemeral=True)
+        else:
+            logging.info(f"Scan complete. Gave Member role to {given_member_role} users.")
+
+    @app_commands.command(name="scan_existing_members", description="Scan all members and ensure proper verification tracking (admin only)")
+    @app_commands.default_permissions(administrator=True)
+    async def scan_existing_members_cmd(self, interaction: discord.Interaction):
+        """Admin command to scan all members and ensure proper tracking."""
+        await self.scan_existing_members(interaction.guild, interaction)
+
+    async def periodic_monitor(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            try:
+                await self.monitor_open_tickets_and_roles()
+            except Exception as e:
+                logging.error(f"Error in periodic monitor: {e}")
+            await asyncio.sleep(1800)  # 30 minutes
+
+    async def monitor_open_tickets_and_roles(self):
+        """Check all users with open tickets and ensure they are being monitored and do not have subscription roles."""
+        guild_id = os.getenv('GUILD_ID')
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        if not guild:
+            logging.warning("Guild not found for periodic monitor.")
+            return
+        launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
+        member_role_id = get_env_role_id('MEMBER_ROLE_ID')
+        subscription_roles = {launchpad_role_id, member_role_id}
+        for user_id, channel_id in list(self.user_ticket_channels.items()):
+            member = guild.get_member(user_id)
+            if not member:
+                continue
+            user_role_ids = {role.id for role in member.roles if role != guild.default_role}
+            has_subscription = user_role_ids & subscription_roles
+            is_monitored = user_id in self.users_awaiting_verification or user_id in self.users_being_verified
+            if has_subscription and not is_monitored:
+                # Remove roles and add to monitoring
+                roles_to_remove = [guild.get_role(rid) for rid in has_subscription if guild.get_role(rid)]
+                try:
+                    await member.remove_roles(*roles_to_remove, reason="Periodic monitor: user had roles but was not monitored")
+                    valid_rids = [rid for rid in has_subscription if rid is not None]
+                    self.member_original_roles[user_id] = valid_rids
+                    self.users_awaiting_verification.add(user_id)
+                    logging.info(f"Periodic monitor: Removed roles and added {member.name} to monitoring.")
+                except Exception as e:
+                    logging.error(f"Periodic monitor: Failed to remove roles from {member.name}: {e}")
+            elif not has_subscription and is_monitored:
+                # User has no subscription roles but is being monitored, mark as verified
+                self.users_awaiting_verification.discard(user_id)
+                self.users_being_verified.discard(user_id)
+                self.member_original_roles.pop(user_id, None)
+                logging.info(f"Periodic monitor: {member.name} had no roles, removed from monitoring.")
+            self.save_state()
+
+    def make_stored_roles_embed(self, guild, pending_users, page, per_page):
+        embed = discord.Embed(
+            title="📊 Pending Verifications",
+            description=f"Page {page+1}/{max(1, (len(pending_users)-1)//per_page+1)}",
+            color=discord.Color.blue()
+        )
+        start = page * per_page
+        end = start + per_page
+        for member in pending_users[start:end]:
+            roles = [guild.get_role(rid) for rid in self.member_original_roles.get(member.id, [])]
+            role_names = ", ".join([r.name for r in roles if r]) if roles else "None"
+            status = []
+            if member.id in self.users_awaiting_verification:
+                status.append("🔍 Monitored")
+            if member.id in self.users_being_verified:
+                status.append("⚙️ Verifying")
+            status_str = " | ".join(status) if status else "⚠️ Not tracked"
+            embed.add_field(name=member.display_name, value=f"{member.mention}\nRoles: {role_names}\nStatus: {status_str}", inline=False)
+        embed.set_footer(text=f"Total pending: {len(pending_users)}")
+        return embed
+
+    @app_commands.command(name="funnel_analytics", description="Show verification funnel analytics (admin only)")
+    @app_commands.default_permissions(administrator=True)
+    async def funnel_analytics(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        # Count users at each stage
+        joined = 0
+        ticket_created = 0
+        call_booked = 0
+        verified = 0
+        dropped_off = 0
+        for funnel in self.verification_funnel.values():
+            if 'joined' in funnel:
+                joined += 1
+            if 'ticket_created' in funnel:
+                ticket_created += 1
+            if 'call_booked' in funnel:
+                call_booked += 1
+            if 'verified' in funnel:
+                verified += 1
+            if 'dropped_off' in funnel:
+                dropped_off += 1
+        def pct(part, whole):
+            return f"{(part/whole*100):.1f}%" if whole else "0%"
+        embed = discord.Embed(
+            title="📈 Verification Funnel Analytics",
+            color=discord.Color.purple()
+        )
+        embed.add_field(name="Joined", value=f"{joined}", inline=True)
+        embed.add_field(name="Ticket Created", value=f"{ticket_created} ({pct(ticket_created, joined)})", inline=True)
+        embed.add_field(name="Call Booked", value=f"{call_booked} ({pct(call_booked, ticket_created)})", inline=True)
+        embed.add_field(name="Verified", value=f"{verified} ({pct(verified, call_booked)})", inline=True)
+        embed.add_field(name="Dropped Off", value=f"{dropped_off} ({pct(dropped_off, joined)})", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    def save_state(self):
+        """Persist ongoing verifications and funnel analytics to disk."""
+        try:
+            # Serialize funnel datetimes as ISO strings
+            funnel_serialized = {
+                str(uid): {k: v.isoformat() for k, v in stages.items()}
+                for uid, stages in self.verification_funnel.items()
+            }
+            state = {
+                "member_original_roles": {str(k): v for k, v in self.member_original_roles.items()},
+                "users_awaiting_verification": list(self.users_awaiting_verification),
+                "users_being_verified": list(self.users_being_verified),
+                "user_ticket_channels": {str(k): v for k, v in self.user_ticket_channels.items()},
+                "verification_funnel": funnel_serialized
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+            logging.info(f"Saved verification state to {self.state_file}")
+        except Exception as e:
+            logging.error(f"Error saving verification state: {e}")
+
+    def load_state(self):
+        """Load ongoing verifications and funnel analytics from disk."""
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
+                self.member_original_roles = {int(k): v for k, v in state.get("member_original_roles", {}).items()}
+                self.users_awaiting_verification = set(state.get("users_awaiting_verification", []))
+                self.users_being_verified = set(state.get("users_being_verified", []))
+                self.user_ticket_channels = {int(k): v for k, v in state.get("user_ticket_channels", {}).items()}
+                # Deserialize funnel datetimes
+                funnel_loaded = {}
+                for uid, stages in state.get("verification_funnel", {}).items():
+                    funnel_loaded[int(uid)] = {k: datetime.fromisoformat(v) for k, v in stages.items()}
+                self.verification_funnel = funnel_loaded
+                logging.info(f"Loaded verification state from {self.state_file}")
+        except Exception as e:
+            logging.error(f"Error loading verification state: {e}")
+
+# Paginated view for stored roles
+class StoredRolesView(View):
+    def __init__(self, cog, guild, pending_users, page=0, per_page=10):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild = guild
+        self.pending_users = pending_users
+        self.page = page
+        self.per_page = per_page
+        self.max_page = max(0, (len(pending_users) - 1) // per_page)
+        self.add_buttons()
+
+    def add_buttons(self):
+        self.clear_items()
+        if self.page > 0:
+            self.add_item(StoredRolesNavButton(self, "prev"))
+        if self.page < self.max_page:
+            self.add_item(StoredRolesNavButton(self, "next"))
+        for member in self.pending_users[self.page * self.per_page:(self.page + 1) * self.per_page]:
+            self.add_item(StoredRolesForceVerifyButton(self, member))
+
+class StoredRolesNavButton(Button):
+    def __init__(self, view, direction):
+        label = "Previous" if direction == "prev" else "Next"
+        super().__init__(label=label, style=discord.ButtonStyle.secondary)
+        self.view_ref = view
+        self.direction = direction
+
+    async def callback(self, interaction: discord.Interaction):
+        if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Admins only!", ephemeral=True)
+            return
+        if self.direction == "prev":
+            self.view_ref.page -= 1
+        else:
+            self.view_ref.page += 1
+        self.view_ref.add_buttons()
+        embed = self.view_ref.cog.make_stored_roles_embed(self.view_ref.guild, self.view_ref.pending_users, self.view_ref.page, self.view_ref.per_page)
+        await interaction.response.edit_message(embed=embed, view=self.view_ref)
+
+class StoredRolesForceVerifyButton(Button):
+    def __init__(self, view, member):
+        super().__init__(label=f"Force Verify: {member.display_name}", style=discord.ButtonStyle.success)
+        self.view_ref = view
+        self.member = member
+
+    async def callback(self, interaction: discord.Interaction):
+        if not (isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ Admins only!", ephemeral=True)
+            return
+        await self.view_ref.cog.restore_member_roles(self.member)
+        await interaction.response.send_message(f"✅ Force verified {self.member.mention}.", ephemeral=True)
+        # Optionally, update the embed
+        embed = self.view_ref.cog.make_stored_roles_embed(self.view_ref.guild, self.view_ref.pending_users, self.view_ref.page, self.view_ref.per_page)
+        if interaction.message:
+            await interaction.message.edit(embed=embed, view=self.view_ref)
 
 async def setup(bot):
     await bot.add_cog(MemberManagement(bot))
