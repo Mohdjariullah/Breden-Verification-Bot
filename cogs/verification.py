@@ -6,6 +6,7 @@ import os
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
+from typing import Dict, Set
 
 from cogs.security_utils import safe_int_convert, security_check
 
@@ -29,6 +30,7 @@ def require_guild_admin(interaction: discord.Interaction) -> bool:
 class VerificationView(View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.ticket_cooldowns = {}  # user_id: timestamp
 
     @discord.ui.button(
         label="Start Verification",
@@ -37,21 +39,30 @@ class VerificationView(View):
         emoji="🔒"
     )
     async def verify_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        import time
         # SECURITY: Block DMs completely
         if not interaction.guild:
             return await interaction.response.send_message(
                 "❌ Verification can only be started in the server!", 
                 ephemeral=True
             )
-        
+        user_id = interaction.user.id
+        now = time.time()
+        cooldown = 10  # seconds
+        # Cooldown check
+        last_press = self.ticket_cooldowns.get(user_id, 0)
+        if now - last_press < cooldown:
+            return await interaction.response.send_message(
+                f"⏳ Please wait {int(cooldown - (now - last_press))} seconds before trying again.",
+                ephemeral=True
+            )
+        self.ticket_cooldowns[user_id] = now
         await interaction.response.defer(ephemeral=True)
-
         # Check if user already has any of the subscription roles
         launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
         member_role_id = get_env_role_id('MEMBER_ROLE_ID')
         subscription_roles = set(filter(None, [launchpad_role_id, member_role_id]))
         user_roles = {r.id for r in getattr(interaction.user, 'roles', [])}
-
         if user_roles & subscription_roles:
             return await interaction.followup.send(
                 embed=discord.Embed(
@@ -61,7 +72,6 @@ class VerificationView(View):
                 ),
                 ephemeral=True
             )
-
         # Check if user has stored roles (meaning they need verification)
         member_cog = getattr(getattr(interaction, 'client', None), 'get_cog', lambda name: None)('MemberManagement')
         if not member_cog or interaction.user.id not in getattr(member_cog, 'member_original_roles', {}):
@@ -73,16 +83,25 @@ class VerificationView(View):
                 ),
                 ephemeral=True
             )
-
+        # --- Only allow one ticket per user ---
+        if member_cog and user_id in member_cog.user_ticket_channels:
+            channel_id = member_cog.user_ticket_channels[user_id]
+            channel = interaction.guild.get_channel(channel_id)
+            if channel:
+                return await interaction.followup.send(
+                    f"🔗 You already have a verification ticket: {channel.mention}",
+                    ephemeral=True
+                )
+            else:
+                # Clean up mapping if channel doesn't exist
+                member_cog.unregister_ticket(user_id)
         # FIXED: Better duplicate ticket prevention
         ticket_name = f"verify-{interaction.user.name.lower()}"
         existing_tickets = []
-        
         # Find ALL existing tickets for this user
         for channel in interaction.guild.channels:
             if isinstance(channel, discord.TextChannel) and channel.name.startswith(f"verify-{interaction.user.name.lower()}"):
                 existing_tickets.append(channel)
-        
         if existing_tickets:
             # Delete all existing tickets first
             for ticket in existing_tickets:
@@ -91,10 +110,8 @@ class VerificationView(View):
                     logging.info(f"Deleted existing ticket: {ticket.name}")
                 except Exception as e:
                     logging.error(f"Failed to delete existing ticket {ticket.name}: {e}")
-            
             # Small delay to ensure deletion completes
             await asyncio.sleep(2)
-
         # Create ticket channel with proper permissions from the start
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(
@@ -105,7 +122,7 @@ class VerificationView(View):
             interaction.user: discord.PermissionOverwrite(
                 view_channel=True,
                 read_messages=True,
-                read_message_history=True,  # KEY: Allow reading message history
+                read_message_history=True,
                 send_messages=True,
                 attach_files=True,
                 embed_links=True,
@@ -122,7 +139,6 @@ class VerificationView(View):
                 manage_channels=True
             )
         }
-
         # Add permissions for administrators
         for role in interaction.guild.roles:
             if role.permissions.administrator:
@@ -133,7 +149,6 @@ class VerificationView(View):
                     send_messages=True,
                     manage_messages=True
                 )
-
         try:
             ticket_channel = await interaction.guild.create_text_channel(
                 name=ticket_name,
@@ -143,6 +158,9 @@ class VerificationView(View):
                 reason=f"Verification ticket created for {interaction.user.name}"
             )
             logging.info(f"Created verification ticket: {ticket_channel.name} for {interaction.user.name}")
+            # Register ticket in MemberManagement
+            if member_cog:
+                member_cog.register_ticket(user_id, ticket_channel.id)
         except Exception as e:
             await interaction.followup.send(f'❌ Failed to create ticket channel: {e}', ephemeral=True)
             logging.error(f"Failed to create ticket channel for {interaction.user.name}: {e}")
@@ -180,7 +198,7 @@ class VerificationView(View):
         await ticket_channel.send(
             f"Welcome {interaction.user.mention}! Let's verify your subscription access.",
             embed=embed,
-            view=ConfirmBookingView(interaction.user, ticket_channel.id)  # Pass channel ID
+            view=ConfirmBookingView(interaction.user, ticket_channel.id)
         )
 
         # Log verification start
@@ -196,56 +214,69 @@ class VerificationView(View):
         async def auto_close():
             await asyncio.sleep(86400)
             try:
-                # Send DM to user before closing ticket
-                try:
-                    dm_embed = discord.Embed(
-                        title="⏰ Verification Ticket Expired",
-                        description=(
-                            "Your verification ticket has been automatically closed after 24 hours.\n\n"
-                            "**To continue your verification:**\n"
-                            "1. Return to the verification channel\n"
-                            "2. Click the 'Start Verification' button again\n"
-                            "3. Complete your booking and verification process\n\n"
-                            "We are waiting for you to return and complete your verification!"
-                        ),
-                        color=discord.Color.orange()
-                    )
-                    dm_embed.add_field(
-                        name="📋 Your Subscription",
-                        value="\n".join(subscription_info),
-                        inline=False
-                    )
-                    dm_embed.add_field(
-                        name="🔗 Quick Actions",
-                        value=(
-                            f"• [Book Your Call]({BOOKING_LINK})\n"
-                            "• Return to server to create new ticket"
-                        ),
-                        inline=False
-                    )
-                    dm_embed.set_footer(text=f"Server: {getattr(interaction.guild, 'name', 'Unknown')}")
-                    
-                    await interaction.user.send(embed=dm_embed)
-                    logging.info(f"Sent DM notification to {interaction.user.name} about expired ticket")
-                    
-                except discord.Forbidden:
-                    logging.warning(f"Could not send DM to {interaction.user.name} - DMs disabled")
-                except Exception as e:
-                    logging.error(f"Error sending DM to {interaction.user.name}: {e}")
+                # Check if ticket still exists and user is still in server
+                current_ticket = interaction.guild.get_channel(ticket_channel.id) if interaction.guild else None
+                current_member = interaction.guild.get_member(interaction.user.id) if interaction.guild else None
+                
+                if not current_ticket:
+                    logging.info(f"Ticket for {interaction.user.name} already deleted - skipping auto-close")
+                    return
+                
+                # Send DM to user before closing ticket (only if they're still in server)
+                if current_member:
+                    try:
+                        dm_embed = discord.Embed(
+                            title="⏰ Verification Ticket Expired",
+                            description=(
+                                "Your verification ticket has been automatically closed after 24 hours.\n\n"
+                                "**To continue your verification:**\n"
+                                "1. Return to the verification channel\n"
+                                "2. Click the 'Start Verification' button again\n"
+                                "3. Complete your booking and verification process\n\n"
+                                "We are waiting for you to return and complete your verification!"
+                            ),
+                            color=discord.Color.orange()
+                        )
+                        dm_embed.add_field(
+                            name="📋 Your Subscription",
+                            value="\n".join(subscription_info),
+                            inline=False
+                        )
+                        dm_embed.add_field(
+                            name="🔗 Quick Actions",
+                            value=(
+                                f"• [Book Your Call]({BOOKING_LINK})\n"
+                                "• Return to server to create new ticket"
+                            ),
+                            inline=False
+                        )
+                        dm_embed.set_footer(text=f"Server: {getattr(interaction.guild, 'name', 'Unknown')}")
+                        
+                        await interaction.user.send(embed=dm_embed)
+                        logging.info(f"Sent DM notification to {interaction.user.name} about expired ticket")
+                        
+                    except discord.Forbidden:
+                        logging.warning(f"Could not send DM to {interaction.user.name} - DMs disabled")
+                    except Exception as e:
+                        logging.error(f"Error sending DM to {interaction.user.name}: {e}")
 
                 # Delete the ticket channel
-                if ticket_channel and hasattr(ticket_channel, 'delete'):
-                    try:
-                        await ticket_channel.delete()
-                        logging.info(f"Auto-deleted expired ticket for {interaction.user.name}")
-                    except Exception as e:
-                        logging.error(f'Failed to delete expired ticket channel: {e}')
+                try:
+                    await current_ticket.delete(reason="Verification ticket expired after 24 hours")
+                    logging.info(f"Auto-deleted expired ticket for {interaction.user.name}")
+                    
+                    # Unregister ticket
+                    if member_cog:
+                        member_cog.unregister_ticket(interaction.user.id)
+                        
+                except Exception as e:
+                    logging.error(f'Failed to delete expired ticket channel: {e}')
                 
                 # Log the auto-close
                 await self.log_verification_event(
                     interaction.guild,
                     "⏰ Verification Ticket Auto-Closed",
-                    f"Verification ticket for {interaction.user.mention} auto-closed after 24 hours (DM sent)",
+                    f"Verification ticket for {interaction.user.mention} auto-closed after 24 hours (DM sent: {'Yes' if current_member else 'No - user left'})",
                     interaction.user,
                     discord.Color.orange()
                 )
@@ -468,7 +499,8 @@ class Verification(commands.Cog):
         embed.add_field(name="Selected Channel", value=channel.mention, inline=True)
         embed.add_field(name="Channel ID", value=f"`{channel.id}`", inline=True)
         
-        current_logs_id = safe_int_convert(os.getenv('LOGS_CHANNEL_ID'))
+        current_logs_id_env = os.getenv('LOGS_CHANNEL_ID')
+        current_logs_id = safe_int_convert(current_logs_id_env) if current_logs_id_env else None
         current_logs_channel = f"<#{current_logs_id}>" if current_logs_id else "Not set"
         embed.add_field(name="Current Logs Channel", value=current_logs_channel, inline=True)
         

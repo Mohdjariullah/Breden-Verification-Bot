@@ -11,9 +11,13 @@ from .security_utils import (
     validate_input, check_rate_limit, safe_audit_log_check,
     SecureLogger, sanitize_log_message
 )
+from .bypass_manager import bypass_manager
 
 def get_env_role_id(var_name):
-    return safe_int_convert(os.getenv(var_name), min_val=1, max_val=2**63-1)
+    env_value = os.getenv(var_name)
+    if env_value is None:
+        raise ValueError(f"Environment variable '{var_name}' is not set")
+    return safe_int_convert(env_value, min_val=1, max_val=2**63-1)
 
 class MemberManagement(commands.Cog):
     def __init__(self, bot):
@@ -30,7 +34,9 @@ class MemberManagement(commands.Cog):
         self.total_verified: int = 0
         # Security: Lock for thread-safe operations
         self._role_lock = asyncio.Lock()
-        SecureLogger.info("MemberManagement cog initialized with production security")
+        # Track user to ticket channel mapping
+        self.user_ticket_channels: Dict[int, int] = {}
+        SecureLogger.info("MemberManagement cog initialized with production security and bypass system")
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -39,10 +45,27 @@ class MemberManagement(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_join(self, member):
-        """Handle new member joins - ALL users must verify to get Member role"""
+        """Handle new member joins - Check for bypass roles first"""
         async with self._role_lock:
             try:
                 SecureLogger.info(f"Member {member.name} joined server {member.guild.name}")
+                
+                # NEW: Check for bypass roles first
+                if bypass_manager.has_bypass_role(member):
+                    bypass_role_names = bypass_manager.get_bypass_role_names(member.guild)
+                    print(f"✅ DEBUG: User {member.name} has bypass roles: {bypass_role_names}")
+                    
+                    # Log bypass and exit early
+                    await self.log_member_event(
+                        member.guild,
+                        "🎯 Verification Bypassed",
+                        f"{member.mention} joined with bypass roles: {', '.join(bypass_role_names)} - no verification required",
+                        member,
+                        discord.Color.gold()
+                    )
+                    
+                    logging.info(f"User {member.name} bypassed verification with roles: {bypass_role_names}")
+                    return  # Exit early - no verification needed
                 
                 # Validate environment variables
                 launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
@@ -89,8 +112,25 @@ class MemberManagement(commands.Cog):
                             member,
                             discord.Color.yellow()
                         )
+                
+                    # NEW: Check for bypass roles again after delay (in case they were added)
+                    if bypass_manager.has_bypass_role(updated_member):
+                        bypass_role_names = bypass_manager.get_bypass_role_names(member.guild)
+                        print(f"✅ DEBUG: User {member.name} gained bypass roles after join: {bypass_role_names}")
+                        
+                        # Log bypass and exit early
+                        await self.log_member_event(
+                            member.guild,
+                            "🎯 Verification Bypassed (Post-Join)",
+                            f"{member.mention} gained bypass roles after join: {', '.join(bypass_role_names)} - no verification required",
+                            member,
+                            discord.Color.gold()
+                        )
+                        
+                        logging.info(f"User {member.name} bypassed verification with post-join roles: {bypass_role_names}")
+                        return  # Exit early - no verification needed
             
-                # NEW LOGIC: ALL users must verify, but handle differently based on roles
+                # Continue with normal verification logic for non-bypass users
                 if has_subscription_roles:
                     print(f"✅ DEBUG: User has subscription roles, storing and removing for verification...")
                     # User has subscription roles - store them and remove for verification
@@ -132,13 +172,16 @@ class MemberManagement(commands.Cog):
                 else:
                     print(f"🔍 DEBUG: User has no subscription roles, but still needs to verify for Member role")
                     # NEW: User joined without subscription roles - still needs to verify for Member role
-                
+
                     # Store Member role as the role they should get after verification
-                    self.member_original_roles[member.id] = [member_role_id]
-                
+                    # Only store if member_role_id is not None (type safety for List[int])
+                    if member_role_id is not None:
+                        self.member_original_roles[member.id] = [member_role_id]
+                    else:
+                        self.member_original_roles[member.id] = []
+
                     # Add to monitoring list
                     self.users_awaiting_verification.add(member.id)
-                
                     print(f"✅ DEBUG: Added user {member.name} to verification queue for Member role")
                     logging.info(f"New user {member.name} ({member.id}) added to verification queue for Member role")
                 
@@ -159,7 +202,7 @@ class MemberManagement(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        """Handle member leaves - stop monitoring and log if they had subscription roles"""
+        """Handle member leaves - stop monitoring and log if they had subscription roles. Also delete their ticket if open."""
         try:
             print(f"\n👋 DEBUG: Member {member.name} left server {member.guild.name}")
             
@@ -169,6 +212,26 @@ class MemberManagement(commands.Cog):
             was_verifying = member.id in self.users_being_verified
             
             stored_roles_info = []
+            
+            # --- Delete ticket if exists ---
+            ticket_channel_id = self.user_ticket_channels.get(member.id)
+            if ticket_channel_id:
+                ticket_channel = member.guild.get_channel(ticket_channel_id)
+                if ticket_channel:
+                    try:
+                        await ticket_channel.delete(reason="User left during verification")
+                        await self.log_member_event(
+                            member.guild,
+                            "🗑️ Verification Ticket Deleted",
+                            f"{member.mention}'s verification ticket was deleted because they left the server.",
+                            member,
+                            discord.Color.red(),
+                            None
+                        )
+                        print(f"🗑️ Deleted verification ticket for {member.name}")
+                    except Exception as e:
+                        print(f"❌ Failed to delete ticket for {member.name}: {e}")
+                self.unregister_ticket(member.id)
             
             if had_stored_roles:
                 # Get the stored role information before cleaning up
@@ -205,10 +268,10 @@ class MemberManagement(commands.Cog):
                 await self.log_member_event(
                     member.guild,
                     log_title,
-                    log_desc,
+                    log_desc + f"\nRoles: {', '.join(stored_roles_info)}",
                     member,
                     log_color,
-                    stored_roles_info
+                    None  # Do not pass string list as roles
                 )
                 
                 logging.info(f"Member {member.name} ({member.id}) left with stored roles: {stored_roles_info}")
@@ -229,9 +292,8 @@ class MemberManagement(commands.Cog):
                     member,
                     discord.Color.greyple()
                 )
-                
+
                 logging.info(f"Untracked user {member.name} ({member.id}) left the server")
-                
         except Exception as e:
             print(f"❌ DEBUG: Error in on_member_remove: {e}")
             logging.error(f"Error in on_member_remove for {member.name}: {e}")
@@ -494,17 +556,23 @@ class MemberManagement(commands.Cog):
         try:
             monitor_seconds = 120
             print(f"⏳ Monitoring {member.name} for {monitor_seconds} seconds post-verification...")
-            
             for _ in range(monitor_seconds // 5):  # Check every 5 seconds
                 await asyncio.sleep(5)
-                
                 try:
                     # Get fresh member data
-                    fresh_member = await member.guild.fetch_member(member.id)
+                    fresh_member = None
+                    try:
+                        fresh_member = await member.guild.fetch_member(member.id)
+                    except discord.NotFound:
+                        print(f"🛑 {member.name} is no longer in the server. Stopping monitoring.")
+                        break
+                    except Exception:
+                        fresh_member = None
+                    if not fresh_member:
+                        break
                     user_role_ids = {role.id for role in fresh_member.roles}
-                except:
+                except Exception as e:
                     user_role_ids = {role.id for role in member.roles}
-                
                 missing = expected_role_ids - user_role_ids
                 if missing:
                     print(f"⚠️ {member.name} lost roles {missing} during monitoring. Re-adding...")
@@ -515,7 +583,10 @@ class MemberManagement(commands.Cog):
                             logging.info(f"Re-added lost roles to {member.name} during monitoring")
                     except Exception as e:
                         logging.error(f"Error re-adding lost roles to {member.name} during monitoring: {e}")
-            
+                        # If user left (404 Not Found), stop monitoring to prevent spam
+                        if "Unknown Member" in str(e) or "404" in str(e):
+                            print(f"🛑 Stopping monitoring for {member.name} (left server)")
+                            break
             print(f"✅ Monitoring complete for {member.name}")
             
         except Exception as e:
@@ -960,6 +1031,163 @@ class MemberManagement(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         log_embed = discord.Embed(title="Admin Command Used", description=f"/help_admin used by {interaction.user.mention}", color=discord.Color.purple())
         await self.send_to_logs(interaction.guild, log_embed)
+
+    @app_commands.command(name="add_bypass_role", description="Add a role that bypasses verification")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(role="The role to add to bypass list")
+    async def add_bypass_role(self, interaction: discord.Interaction, role: discord.Role):
+        """Add a role to the verification bypass list"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
+        # Check if role is already in bypass list
+        if role.id in bypass_manager.get_bypass_roles():
+            return await interaction.response.send_message(
+                f"❌ Role **{role.name}** is already in the bypass list!",
+                ephemeral=True
+            )
+        
+        # Add role to bypass list
+        success = bypass_manager.add_bypass_role(role.id)
+        
+        if success:
+            embed = discord.Embed(
+                title="✅ Bypass Role Added",
+                description=f"Role **{role.name}** has been added to the verification bypass list.",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Role", value=role.mention, inline=True)
+            embed.add_field(name="Role ID", value=f"`{role.id}`", inline=True)
+            embed.add_field(
+                name="Effect", 
+                value="Users with this role will skip verification entirely", 
+                inline=False
+            )
+            
+            # Log the action
+            await self.log_member_event(
+                interaction.guild,
+                "🎯 Bypass Role Added",
+                f"{interaction.user.mention} added bypass role: {role.mention}",
+                interaction.user,
+                discord.Color.purple()
+            )
+            
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="remove_bypass_role", description="Remove a role from the verification bypass list")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(role="The role to remove from bypass list")
+    async def remove_bypass_role(self, interaction: discord.Interaction, role: str):
+        """Remove a role from the verification bypass list"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
+        # Convert role ID string to role object
+        try:
+            role_id = int(role)
+        except Exception:
+            return await interaction.response.send_message("❌ Invalid role selected!", ephemeral=True)
+        role_obj = interaction.guild.get_role(role_id)
+        if not role_obj:
+            return await interaction.response.send_message("❌ Role not found!", ephemeral=True)
+        # Check if role is in bypass list
+        if role_id not in bypass_manager.get_bypass_roles():
+            return await interaction.response.send_message(
+                f"❌ Role **{role_obj.name}** is not in the bypass list!",
+                ephemeral=True
+            )
+        # Remove role from bypass list
+        success = bypass_manager.remove_bypass_role(role_id)
+        if success:
+            embed = discord.Embed(
+                title="✅ Bypass Role Removed",
+                description=f"Role **{role_obj.name}** has been removed from the verification bypass list.",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="Role", value=role_obj.mention, inline=True)
+            embed.add_field(name="Role ID", value=f"`{role_obj.id}`", inline=True)
+            embed.add_field(
+                name="Effect", 
+                value="Users with this role will now need to verify", 
+                inline=False
+            )
+            # Log the action
+            await self.log_member_event(
+                interaction.guild,
+                "🎯 Bypass Role Removed",
+                f"{interaction.user.mention} removed bypass role: {role_obj.mention}",
+                interaction.user,
+                discord.Color.purple()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @remove_bypass_role.autocomplete('role')
+    async def remove_bypass_role_autocomplete(self, interaction: discord.Interaction, current: str):
+        # Only suggest roles that are in the bypass list
+        bypass_role_ids = set(bypass_manager.get_bypass_roles())
+        if not interaction.guild:
+            return []
+        suggestions = []
+        for role in interaction.guild.roles:
+            if role.id in bypass_role_ids and current.lower() in role.name.lower():
+                suggestions.append(app_commands.Choice(name=role.name, value=str(role.id)))
+                if len(suggestions) >= 20:
+                    break
+        return suggestions
+
+    @app_commands.command(name="list_bypass_roles", description="List all roles that bypass verification")
+    @app_commands.default_permissions(administrator=True)
+    async def list_bypass_roles(self, interaction: discord.Interaction):
+        """List all roles that bypass verification"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
+        bypass_roles = bypass_manager.get_bypass_roles()
+        
+        if not bypass_roles:
+            embed = discord.Embed(
+                title="📋 Bypass Roles List",
+                description="No roles are currently set to bypass verification.",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="ℹ️ How to add bypass roles",
+                value="Use `/add_bypass_role <role>` to add roles that skip verification",
+                inline=False
+            )
+        else:
+            embed = discord.Embed(
+                title="📋 Bypass Roles List",
+                description="\n".join([f"<@&{role_id}>" for role_id in bypass_roles]),
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="ℹ️ How to add bypass roles",
+                value="Use `/add_bypass_role <role>` to add roles that skip verification",
+                inline=False
+            )
+        embed.set_footer(text=f"Total Bypass Roles: {len(bypass_roles)}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # --- Ticket registration helpers ---
+    def register_ticket(self, user_id: int, channel_id: int):
+        self.user_ticket_channels[user_id] = channel_id
+
+    def unregister_ticket(self, user_id: int):
+        self.user_ticket_channels.pop(user_id, None)
 
 async def setup(bot):
     await bot.add_cog(MemberManagement(bot))
