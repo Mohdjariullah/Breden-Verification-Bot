@@ -14,6 +14,8 @@ from .security_utils import (
 from .bypass_manager import bypass_manager
 from discord.ui import View, Button
 import json
+# Requires: pip install redis
+from redis_client import redis_set_user_roles, redis_get_user_roles, redis_delete_user_roles
 
 def get_env_role_id(var_name):
     env_value = os.getenv(var_name)
@@ -455,7 +457,7 @@ class MemberManagement(commands.Cog):
             logging.error(f"Error in track_role_changes: {e}")
 
     async def restore_member_roles(self, member):
-        """Restore original subscription roles to a member after verification"""
+        """Restore original subscription roles to a member after verification, with detailed permission and hierarchy checks and logging"""
         try:
             self.users_being_verified.add(member.id)
             print(f"🔄 DEBUG: Starting verification for {member.name}")
@@ -463,6 +465,10 @@ class MemberManagement(commands.Cog):
             
             restored_roles = []
             verification_success = False  # Track if verification actually succeeded
+            hierarchy_issue = False
+            permission_issue = False
+            hierarchy_details = ""
+            permission_details = ""
             
             if member.id in self.member_original_roles:
                 original_role_ids = self.member_original_roles[member.id]
@@ -476,23 +482,71 @@ class MemberManagement(commands.Cog):
                             logging.warning(f"Role with ID {role_id} not found for {member.name}")
                 
                     if roles_to_restore:
+                        # --- Permission and Hierarchy Checks ---
+                        bot_member = member.guild.me
+                        bot_perms = bot_member.guild_permissions if bot_member else None
+                        has_manage_roles = bot_perms.manage_roles if bot_perms else False
+                        permission_details = f"Bot has manage_roles: {has_manage_roles}"
+                        if not has_manage_roles:
+                            permission_issue = True
+                            print(f"❌ ERROR: Bot lacks 'Manage Roles' permission!")
+                            logging.error(f"Bot lacks 'Manage Roles' permission to restore roles for {member.name}")
+                        # Hierarchy check
+                        bot_top_role = bot_member.top_role if bot_member else None
+                        below_roles = []
+                        for role in roles_to_restore:
+                            if bot_top_role is None or role.position >= bot_top_role.position:
+                                below_roles.append(role)
+                        if below_roles:
+                            hierarchy_issue = True
+                            hierarchy_details = (
+                                f"Bot's top role: {bot_top_role.name if bot_top_role else 'None'} (pos {bot_top_role.position if bot_top_role else 'N/A'})\n" +
+                                "Roles above or equal to bot's top role: " + ", ".join([f"{r.name} (pos {r.position})" for r in below_roles])
+                            )
+                            print(f"❌ ERROR: Bot's top role is not above all roles to restore!")
+                            logging.error(f"Bot's top role is not above all roles to restore for {member.name}: {hierarchy_details}")
+                        # If either issue, log and abort restoration
+                        if permission_issue or hierarchy_issue:
+                            await self.log_member_event(
+                                member.guild,
+                                "❌ Verification Role Restoration Failed (Permissions)",
+                                f"{member.mention} could not be restored due to bot permission or hierarchy issues.\n"
+                                f"{permission_details}\n{hierarchy_details}",
+                                member,
+                                discord.Color.red(),
+                                roles_to_restore
+                            )
+                            self.users_awaiting_verification.discard(member.id)
+                            self.users_being_verified.discard(member.id)
+                            print(f"❌ DEBUG: Aborting role restoration for {member.name} due to permission/hierarchy issues.")
+                            return []
                         # Remove from monitoring BEFORE adding roles to prevent interference
                         self.users_awaiting_verification.discard(member.id)
-                        
-                        await member.add_roles(*roles_to_restore, reason="Subscription verification completed")
+                        try:
+                            await member.add_roles(*roles_to_restore, reason="Subscription verification completed")
+                        except Exception as e:
+                            logging.error(f"Exception during add_roles for {member.name}: {e}")
+                            await self.log_member_event(
+                                member.guild,
+                                "❌ Verification Role Restoration Failed (Exception)",
+                                f"{member.mention} could not be restored due to exception: {e}\n"
+                                f"{permission_details}\n{hierarchy_details}",
+                                member,
+                                discord.Color.red(),
+                                roles_to_restore
+                            )
+                            self.users_being_verified.discard(member.id)
+                            return []
                         restored_roles = roles_to_restore
                         role_names = [role.name for role in roles_to_restore]
                         print(f"✅ DEBUG: Successfully restored roles for {member.name}: {role_names}")
                         logging.info(f"Restored subscription roles for {member.name}: {role_names}")
-                        
                         # Wait longer for Discord to process the role changes
                         await asyncio.sleep(3)
-                        
                         # Check if roles were actually added (with better logic)
                         subscription_role_ids = set([role.id for role in roles_to_restore])
                         max_retries = 4
                         retry_delay = 3
-                        
                         for attempt in range(max_retries):
                             try:
                                 # Refresh member object from Discord
@@ -500,7 +554,6 @@ class MemberManagement(commands.Cog):
                                 user_role_ids = {role.id for role in fresh_member.roles}
                             except:
                                 user_role_ids = {role.id for role in member.roles}
-                            
                             if subscription_role_ids.issubset(user_role_ids):
                                 verification_success = True
                                 print(f"✅ Post-verification check: {member.name} has all roles after {attempt+1} attempt(s)")
@@ -513,7 +566,6 @@ class MemberManagement(commands.Cog):
                                         await asyncio.sleep(retry_delay)
                                     except Exception as e:
                                         logging.error(f"Error retrying role restoration for {member.name}: {e}")
-                        
                         # Log the result ONLY ONCE based on final success/failure
                         if verification_success:
                             await self.log_member_event(
@@ -525,7 +577,6 @@ class MemberManagement(commands.Cog):
                                 roles_to_restore
                             )
                             self.total_verified += 1
-                            
                             # Start post-verification monitoring
                             asyncio.create_task(self._monitor_post_verification(member, subscription_role_ids))
                             # Funnel analytics: log verified
@@ -537,31 +588,29 @@ class MemberManagement(commands.Cog):
                                 await self.log_member_event(
                                     member.guild,
                                     "❌ Verification Role Restoration Failed",
-                                    f"{member.mention} did not receive all subscription roles after verification retries. Manual intervention required.",
+                                    f"{member.mention} did not receive all subscription roles after verification retries. Manual intervention required.\n"
+                                    f"{permission_details}\n{hierarchy_details}",
                                     member,
                                     discord.Color.red(),
                                     roles_to_restore
                                 )
-                                logging.error(f"❌ Failed to restore roles for {member.name} after verification retries!")
+                                logging.error(f"❌ Failed to restore roles for {member.name} after verification retries! {permission_details} {hierarchy_details}")
                     else:
                         logging.info(f"No valid subscription roles to restore for {member.name}")
                         self.users_awaiting_verification.discard(member.id)
                 else:
                     logging.info(f"No original subscription roles to restore for {member.name}")
                     self.users_awaiting_verification.discard(member.id)
-            
                 # Clean up stored data
                 if member.id in self.member_original_roles:
                     del self.member_original_roles[member.id]
             else:
                 logging.warning(f"No stored subscription roles found for {member.name}")
                 self.users_awaiting_verification.discard(member.id)
-            
             self.users_being_verified.discard(member.id)
             print(f"✅ DEBUG: Completed verification process for {member.name}")
             self.save_state()
             return restored_roles
-            
         except Exception as e:
             self.users_being_verified.discard(member.id)
             self.users_awaiting_verification.discard(member.id)
