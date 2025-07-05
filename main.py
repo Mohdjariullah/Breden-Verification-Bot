@@ -47,7 +47,7 @@ check_and_install_requirements()
 
 # Load environment variables
 load_dotenv()
-
+#hi
 def setup_logging():
     """Setup clean, production-ready logging"""
     # Clear any existing handlers
