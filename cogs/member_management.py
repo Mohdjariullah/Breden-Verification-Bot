@@ -133,13 +133,45 @@ class MemberManagement(commands.Cog):
                 # Continue with normal verification logic for non-bypass users
                 if has_subscription_roles:
                     print(f"✅ DEBUG: User has subscription roles, storing and removing for verification...")
-                    # User has subscription roles - store them and remove for verification
+                    
+                    # NEW: Enhanced role handling for VIP users
                     roles_to_remove = [role for role in current_roles if role.id in subscription_roles]
-                
+                    roles_to_store = [role.id for role in roles_to_remove]
+                    
+                    # NEW: If user has VIP role, ensure they also get Member role
+                    launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
+                    member_role_id = get_env_role_id('MEMBER_ROLE_ID')
+                    
+                    if launchpad_role_id in user_role_ids and member_role_id not in user_role_ids:
+                        print(f"🔍 DEBUG: VIP user {member.name} doesn't have Member role, adding it...")
+                        member_role = member.guild.get_role(member_role_id)
+                        if member_role:
+                            try:
+                                await updated_member.add_roles(
+                                    member_role,
+                                    reason="VIP users automatically get Member role"
+                                )
+                                roles_to_store.append(member_role_id)
+                                print(f"✅ DEBUG: Added Member role to VIP user {member.name}")
+                                
+                                # Log the automatic Member role addition
+                                await self.log_member_event(
+                                    member.guild,
+                                    "🎁 VIP Member Role Added",
+                                    f"{member.mention} (VIP) automatically received Member role",
+                                    member,
+                                    discord.Color.green(),
+                                    [member_role]
+                                )
+                            except Exception as e:
+                                print(f"❌ DEBUG: Failed to add Member role to VIP user {member.name}: {e}")
+                                logging.error(f"Failed to add Member role to VIP user {member.name}: {e}")
+                    
                     print(f"🔍 DEBUG: Roles to remove: {[role.name for role in roles_to_remove]}")
+                    print(f"🔍 DEBUG: Roles to store: {roles_to_store}")
                 
                     # Store original roles (as role IDs for persistence)
-                    self.member_original_roles[member.id] = [role.id for role in roles_to_remove]
+                    self.member_original_roles[member.id] = roles_to_store
                 
                     # Add to monitoring list to prevent re-adding
                     self.users_awaiting_verification.add(member.id)
@@ -1188,6 +1220,98 @@ class MemberManagement(commands.Cog):
 
     def unregister_ticket(self, user_id: int):
         self.user_ticket_channels.pop(user_id, None)
+
+    @app_commands.command(name="test_vip_join", description="Test VIP user join with automatic Member role assignment")
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.describe(user="The user to test VIP join with")
+    async def test_vip_join(self, interaction: discord.Interaction, user: discord.Member):
+        """Test VIP user join functionality with automatic Member role assignment"""
+        # SECURITY: Block DMs and check admin permissions
+        if not interaction.guild:
+            return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
+        
+        if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        # Get role IDs
+        launchpad_role_id = get_env_role_id('LAUNCHPAD_ROLE_ID')
+        member_role_id = get_env_role_id('MEMBER_ROLE_ID')
+        
+        # Check current roles
+        current_roles = [role.name for role in user.roles]
+        current_role_ids = {role.id for role in user.roles}
+        
+        embed = discord.Embed(
+            title="🧪 VIP Join Test",
+            description=f"Testing VIP join functionality for {user.mention}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Current Roles", value=", ".join(current_roles) if current_roles else "None", inline=False)
+        embed.add_field(name="VIP Role ID", value=str(launchpad_role_id) if launchpad_role_id else "Not set", inline=True)
+        embed.add_field(name="Member Role ID", value=str(member_role_id) if member_role_id else "Not set", inline=True)
+        
+        # Simulate VIP join by adding VIP role first
+        if not launchpad_role_id:
+            await interaction.followup.send("❌ VIP role ID not configured!", ephemeral=True)
+            return
+            
+        vip_role = interaction.guild.get_role(launchpad_role_id)
+        if not vip_role:
+            await interaction.followup.send("❌ VIP role not found!", ephemeral=True)
+            return
+        
+        try:
+            # Add VIP role to simulate Whop integration
+            await user.add_roles(vip_role, reason="Test VIP join simulation")
+            embed.add_field(name="✅ VIP Role Added", value="Simulated Whop integration", inline=False)
+            
+            # Wait a moment then trigger the join logic
+            await asyncio.sleep(2)
+            
+            # Call the join logic manually
+            await self.on_member_join(user)
+            
+            # Check results
+            updated_roles = [role.name for role in user.roles]
+            updated_role_ids = {role.id for role in user.roles}
+            
+            embed.add_field(name="After Processing", value=", ".join(updated_roles) if updated_roles else "None", inline=False)
+            
+            # Check if Member role was automatically added
+            if member_role_id in updated_role_ids:
+                embed.add_field(name="🎁 Member Role", value="✅ Automatically added to VIP user", inline=True)
+            else:
+                embed.add_field(name="🎁 Member Role", value="❌ Not automatically added", inline=True)
+            
+            # Check if roles are being monitored
+            is_monitored = user.id in self.users_awaiting_verification
+            embed.add_field(name="Monitoring Status", value="✅ Being monitored" if is_monitored else "❌ Not monitored", inline=True)
+            
+            # Check stored roles
+            stored_roles = self.member_original_roles.get(user.id, [])
+            if stored_roles:
+                stored_role_names = []
+                for role_id in stored_roles:
+                    if role_id is not None:  # Type safety check
+                        role = interaction.guild.get_role(role_id)
+                        if role:
+                            stored_role_names.append(role.name)
+                embed.add_field(name="Stored Roles", value=", ".join(stored_role_names), inline=False)
+            else:
+                embed.add_field(name="Stored Roles", value="None", inline=False)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            error_embed = discord.Embed(
+                title="❌ VIP Join Test Failed",
+                description=f"Error during test: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+            logging.error(f"VIP join test failed for {user.name}: {e}")
 
 async def setup(bot):
     await bot.add_cog(MemberManagement(bot))

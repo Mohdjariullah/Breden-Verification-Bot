@@ -7,12 +7,15 @@ import discord
 class BypassManager:
     def __init__(self):
         self.bypass_file = "bypass_roles.json"
+        # Always use absolute path in project root
+        self.bypass_file = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'bypass_roles.json'))
         self.bypass_roles: Set[int] = set()
         self.load_bypass_roles()
     
     def load_bypass_roles(self):
         """Load bypass roles from JSON file"""
         try:
+            logging.info(f"[BypassManager] Loading bypass roles from: {self.bypass_file}")
             if os.path.exists(self.bypass_file):
                 with open(self.bypass_file, 'r') as f:
                     data = json.load(f)
@@ -23,7 +26,7 @@ class BypassManager:
                 self.save_bypass_roles()
                 logging.info(f"Created new bypass roles file: {self.bypass_file}")
         except Exception as e:
-            logging.error(f"Error loading bypass roles: {e}")
+            logging.error(f"Error loading bypass roles from {self.bypass_file}: {e}")
             self.bypass_roles = set()
     
     def save_bypass_roles(self):
@@ -38,7 +41,7 @@ class BypassManager:
                 json.dump(data, f, indent=2)
             logging.info(f"Saved {len(self.bypass_roles)} bypass roles to {self.bypass_file}")
         except Exception as e:
-            logging.error(f"Error saving bypass roles: {e}")
+            logging.error(f"Error saving bypass roles to {self.bypass_file}: {e}")
     
     def add_bypass_role(self, role_id: int) -> bool:
         """Add a role to bypass list"""
