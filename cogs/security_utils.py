@@ -90,42 +90,36 @@ def check_rate_limit(user_id: int, action: str, limit: int = 5, window: int = 60
     rate_limits[action][user_id] = now
     return True
 
-async def log_admin_action(guild: discord.Guild, title: str, description: str, admin_user: discord.Member, 
-                          color=discord.Color.purple(), additional_fields: Dict[str, str] = None):
+async def log_admin_action(guild: Optional[discord.Guild], title: str, description: str, admin_user: Optional[discord.Member], 
+                          color=discord.Color.purple(), additional_fields: Optional[Dict[str, str]] = None):
     """Centralized admin action logging with security"""
-    logs_channel_id = safe_int_convert(os.getenv('LOGS_CHANNEL_ID'))
+    logs_channel_id = safe_int_convert(os.getenv('LOGS_CHANNEL_ID') or '', default=None)
     if not logs_channel_id or not guild:
         return
-    
     try:
         logs_channel = guild.get_channel(logs_channel_id)
-        if not logs_channel:
-            logging.error(f"Logs channel {logs_channel_id} not found")
+        # Only send if logs_channel is a TextChannel or Thread
+        if not (isinstance(logs_channel, (discord.TextChannel, discord.Thread))):
+            logging.error(f"Logs channel {logs_channel_id} is not a text channel or thread")
             return
-        
         # Sanitize description
         safe_description = sanitize_log_message(description)
-        
         embed = discord.Embed(
             title=f"🔧 {title}",
             description=safe_description,
             color=color,
             timestamp=datetime.now(timezone.utc)
         )
-        
-        embed.set_thumbnail(url=admin_user.display_avatar.url)
-        embed.add_field(name="Admin", value=f"{admin_user.mention}\n({admin_user.name})", inline=True)
-        embed.add_field(name="Admin ID", value=str(admin_user.id), inline=True)
+        if admin_user and hasattr(admin_user, 'display_avatar'):
+            embed.set_thumbnail(url=admin_user.display_avatar.url)
+            embed.add_field(name="Admin", value=f"{admin_user.mention}\n({admin_user.name})", inline=True)
+            embed.add_field(name="Admin ID", value=str(admin_user.id), inline=True)
         embed.add_field(name="Guild", value=guild.name, inline=True)
-        
         if additional_fields:
             for field_name, field_value in additional_fields.items():
                 embed.add_field(name=field_name, value=sanitize_log_message(str(field_value)), inline=False)
-        
         embed.set_footer(text=f"Security Level: Production | Guild: {guild.name}")
-        
         await logs_channel.send(embed=embed)
-        
     except Exception as e:
         logging.error(f"Failed to send admin log: {sanitize_log_message(str(e))}")
 
@@ -143,20 +137,17 @@ def security_check(require_guild: bool = True, require_admin: bool = False,
                         ephemeral=True
                     )
                     return
-                
                 # Rate limiting
                 if rate_limit:
-                    action = rate_limit.get('action', 'general')
-                    limit = rate_limit.get('limit', 5)
-                    window = rate_limit.get('window', 60)
-                    
+                    action = str(rate_limit.get('action', 'general'))
+                    limit = int(rate_limit.get('limit', 5))
+                    window = int(rate_limit.get('window', 60))
                     if not check_rate_limit(interaction.user.id, action, limit, window):
                         await interaction.response.send_message(
                             f"❌ Rate limit exceeded! Please wait {window} seconds before trying again.",
                             ephemeral=True
                         )
                         return
-                
                 # Check admin permissions
                 if require_admin:
                     if not isinstance(interaction.user, discord.Member):
@@ -165,23 +156,20 @@ def security_check(require_guild: bool = True, require_admin: bool = False,
                             ephemeral=True
                         )
                         return
-                    
                     if not interaction.user.guild_permissions.administrator:
                         # Log unauthorized attempt
                         await log_admin_action(
-                            interaction.guild,
+                            interaction.guild if interaction.guild else None,
                             "🚨 Unauthorized Command Attempt",
                             f"{interaction.user.mention} tried to use admin command: `/{func.__name__}`",
-                            interaction.user,
+                            interaction.user if isinstance(interaction.user, discord.Member) else None,
                             discord.Color.red()
                         )
-                        
                         await interaction.response.send_message(
                             "❌ You need Administrator permissions to use this command!",
                             ephemeral=True
                         )
                         return
-                
                 # Log admin action before execution
                 if require_admin:
                     command_args = []
@@ -192,36 +180,30 @@ def security_check(require_guild: bool = True, require_admin: bool = False,
                             command_args.append(f"arg{i}: {arg.mention}")
                         else:
                             command_args.append(f"arg{i}: {sanitize_log_message(str(arg))}")
-                    
                     await log_admin_action(
-                        interaction.guild,
+                        interaction.guild if interaction.guild else None,
                         f"Admin Command: /{func.__name__}",
                         f"{interaction.user.mention} executed admin command",
-                        interaction.user,
+                        interaction.user if isinstance(interaction.user, discord.Member) else None,
                         additional_fields={
                             "Command": f"/{func.__name__}",
                             "Arguments": ", ".join(command_args) if command_args else "None"
                         }
                     )
-                
                 # Execute the function with error handling
                 return await func(self, interaction, *args, **kwargs)
-                
             except Exception as e:
                 # Log error without exposing sensitive information
                 error_id = hashlib.md5(f"{func.__name__}{interaction.user.id}{datetime.now()}".encode()).hexdigest()[:8]
-                
                 logging.error(f"Command error [{error_id}]: {sanitize_log_message(str(e))}")
-                
                 if require_admin:
                     await log_admin_action(
-                        interaction.guild,
+                        interaction.guild if interaction.guild else None,
                         "❌ Command Error",
                         f"Error in admin command `/{func.__name__}` (Error ID: {error_id})",
-                        interaction.user,
+                        interaction.user if isinstance(interaction.user, discord.Member) else None,
                         discord.Color.red()
                     )
-                
                 try:
                     if not interaction.response.is_done():
                         await interaction.response.send_message(
@@ -236,22 +218,20 @@ def security_check(require_guild: bool = True, require_admin: bool = False,
                         )
                 except:
                     pass  # Fail silently if we can't send error message
-                
         return wrapper
     return decorator
 
-async def safe_audit_log_check(guild: discord.Guild, target_user_id: int, max_entries: int = 5) -> str:
+async def safe_audit_log_check(guild: Optional[discord.Guild], target_user_id: int, max_entries: int = 5) -> str:
     """Safely check audit logs for role changes"""
     try:
-        if not guild.me.guild_permissions.view_audit_log:
+        if not guild or not getattr(guild.me, 'guild_permissions', None) or not guild.me.guild_permissions.view_audit_log:
             return "No audit log permissions"
-        
         async for entry in guild.audit_logs(limit=max_entries, action=discord.AuditLogAction.member_role_update):
             if entry.target and entry.target.id == target_user_id:
-                if entry.user.bot:
-                    return f"Bot: {entry.user.name}"
-                else:
-                    return f"User: {entry.user.name}"
+                if entry.user and getattr(entry.user, 'bot', False):
+                    return f"Bot: {getattr(entry.user, 'name', 'Unknown')}"
+                elif entry.user:
+                    return f"User: {getattr(entry.user, 'name', 'Unknown')}"
         return "Unknown"
     except discord.Forbidden:
         return "Audit logs not accessible"
@@ -259,22 +239,15 @@ async def safe_audit_log_check(guild: discord.Guild, target_user_id: int, max_en
         logging.error(f"Error checking audit logs: {sanitize_log_message(str(e))}")
         return "Error checking logs"
 
-def safe_file_operation(filename: str, operation: str = 'read', content: str = None) -> Optional[str]:
+def safe_file_operation(filename: str, operation: str = 'read', content: Optional[str] = None) -> Optional[str]:
     """Safely handle file operations with path validation"""
-    # Validate filename
     if not filename or '..' in filename or '/' in filename or '\\' in filename:
         raise SecurityError("Invalid filename")
-    
-    # Restrict to specific directory
     safe_dir = os.path.join(os.getcwd(), 'bot_data')
     os.makedirs(safe_dir, exist_ok=True)
-    
     file_path = os.path.join(safe_dir, filename)
-    
-    # Ensure file is within safe directory
     if not os.path.abspath(file_path).startswith(os.path.abspath(safe_dir)):
         raise SecurityError("Path traversal attempt detected")
-    
     try:
         if operation == 'read':
             if os.path.exists(file_path):

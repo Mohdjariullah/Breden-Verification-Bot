@@ -1,10 +1,22 @@
 {
-    "cSpell.words": [
-        "cooldown",
-        "cooldowns",
-        "dotenv",
-        "greyple",
-        "AIdaptics",
-        "levelname"
-    ]
+  "cSpell.words": [
+    "AIdaptics",
+    "cooldown",
+    "cooldowns",
+    "dotenv",
+    "greyple",
+    "levelname",
+    "pyjson",
+    "hypesquad",
+    "hypesquadevents",
+    "hypesquadbravery",
+    "hypesquadbrilliance",
+    "hypesquadbalance",
+    "discordstaff",
+    "discordearlysupporter",
+    "discordbotdev",
+    "activedev",
+    "userinfo",
+    "blurple"
+  ]
 }

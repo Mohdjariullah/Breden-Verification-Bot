@@ -97,31 +97,22 @@ class AIdapticsWhopGatekeeper(commands.Bot):
         
     async def setup_hook(self):
         print("🔧 Loading cogs...", end=" ")
-        
-        # Load all cogs with clean output
-        cogs_to_load = [
-            ('cogs.verification', 'Verification'),
-            ('cogs.member_management', 'Member Management'),
-            ('cogs.welcome', 'Welcome')
-        ]
-        
-        loaded_count = 0
-        failed_cogs = []
-        
-        for cog_path, cog_name in cogs_to_load:
-            try:
-                await self.load_extension(cog_path)
-                loaded_count += 1
-                logging.info(f"Successfully loaded {cog_name} cog")
-            except Exception as e:
-                failed_cogs.append(cog_name)
-                logging.error(f"Failed to load {cog_name} cog: {e}")
-        
-        if failed_cogs:
-            print(f"⚠️  {loaded_count}/{len(cogs_to_load)} cogs loaded ({len(failed_cogs)} failed)")
-            print(f"   Failed: {', '.join(failed_cogs)}")
-        else:
-            print(f"✅ All {loaded_count} cogs loaded successfully!")
+        try:
+            await self.load_extension('cogs')
+            print(f"✅ All cogs loaded successfully!")
+            logging.info("All cogs loaded via cogs/__init__.py loader")
+        except Exception as e:
+            print(f"❌ Failed to load cogs: {e}")
+            logging.error(f"Failed to load cogs: {e}")
+
+        print("🔧 Loading commands...", end=" ")
+        try:
+            await self.load_extension('commands')
+            print(f"✅ All commands loaded successfully!")
+            logging.info("All commands loaded via commands/__init__.py loader")
+        except Exception as e:
+            print(f"❌ Failed to load commands: {e}")
+            logging.error(f"Failed to load commands: {e}")
         
         print("🔄 Syncing commands...", end=" ")
         
