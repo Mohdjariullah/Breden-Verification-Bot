@@ -17,6 +17,7 @@ from .setup_permissions import setup as setup_setup_permissions
 from .restore_permissions import setup as setup_restore_permissions
 from .refresh_welcome import setup as setup_refresh_welcome
 from .userinfo import setup as setup_userinfo
+from .debug_logs import setup as setup_debug_logs
 
 async def setup(bot: commands.Bot) -> None:
     """Add admin commands to the bot."""
@@ -52,3 +53,5 @@ async def setup(bot: commands.Bot) -> None:
     logger.debug(msg.format("refresh_welcome"))
     await setup_userinfo(bot)
     logger.debug(msg.format("userinfo"))
+    await setup_debug_logs(bot)
+    logger.debug(msg.format("debug_logs"))
