@@ -4,6 +4,17 @@ from discord.ext import commands
 import typing
 from typing import Optional
 from cogs.member_management import MemberManagement
+import os
+
+OWNER_USER_IDS = {890323443252351046, 879714530769391686}
+GUILD_ID = int(os.getenv('GUILD_ID', 0))
+
+def is_authorized_guild_or_owner(interaction):
+    if interaction.guild and interaction.guild.id == GUILD_ID:
+        return True
+    if interaction.user.id in OWNER_USER_IDS:
+        return True
+    return False
 
 def get_pending_verification_users(mm_cog, guild):
     # Return a list of discord.Member objects for users who have not completed verification
@@ -25,6 +36,10 @@ async def force_verify(interaction: discord.Interaction, user: Optional[str] = N
         return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
     if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("❌ You need Administrator permissions!", ephemeral=True)
+    if not is_authorized_guild_or_owner(interaction):
+        return await interaction.response.send_message(
+            "❌ You are not authorized to use this command.", ephemeral=True
+        )
     await interaction.response.defer(ephemeral=True)
     bot = typing.cast(commands.Bot, interaction.client)
     member_cog = bot.get_cog("MemberManagement")

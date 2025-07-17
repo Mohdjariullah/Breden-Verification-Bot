@@ -7,11 +7,25 @@ import json
 import io
 from datetime import datetime
 
+OWNER_USER_IDS = {890323443252351046, 879714530769391686}
+GUILD_ID = int(os.getenv('GUILD_ID', 0))
+
+def is_authorized_guild_or_owner(interaction):
+    if interaction.guild and interaction.guild.id == GUILD_ID:
+        return True
+    if interaction.user.id in OWNER_USER_IDS:
+        return True
+    return False
+
 @app_commands.command(name="restore_permissions", description="Restore channel permissions from a backup")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(backup_id="The backup ID from the logs (format: YYYYMMDD_HHMMSS)")
 async def restore_permissions(interaction: discord.Interaction, backup_id: str):
     """Restore channel permissions from a backup"""
+    if not is_authorized_guild_or_owner(interaction):
+        return await interaction.response.send_message(
+            "❌ You are not authorized to use this command.", ephemeral=True
+        )
     await interaction.response.defer(ephemeral=True)
     # SECURITY: Block DMs and check admin permissions
     if not interaction.guild:

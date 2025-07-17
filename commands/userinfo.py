@@ -3,6 +3,17 @@ from discord import app_commands
 from discord.ext import commands
 from typing import Optional
 import discord.abc
+import os
+
+OWNER_USER_IDS = {890323443252351046, 879714530769391686}
+GUILD_ID = int(os.getenv('GUILD_ID', 0))
+
+def is_authorized_guild_or_owner(interaction):
+    if interaction.guild and interaction.guild.id == GUILD_ID:
+        return True
+    if interaction.user.id in OWNER_USER_IDS:
+        return True
+    return False
 
 # Discord badge emoji map (partial, can be extended)
 BADGE_EMOJIS = {
@@ -20,10 +31,14 @@ BADGE_EMOJIS = {
 
 
 @app_commands.command(name="userinfo", description="Show detailed info about a user")
-@app_commands.describe(user="The user to show info for (optional)")
+@app_commands.describe(user="The user to show info for (leave blank for yourself)")
 async def userinfo(
     interaction: discord.Interaction, user: Optional[discord.Member] = None
 ):
+    if not is_authorized_guild_or_owner(interaction):
+        return await interaction.response.send_message(
+            "❌ You are not authorized to use this command.", ephemeral=True
+        )
     guild = interaction.guild
     if user is None:
         user = (

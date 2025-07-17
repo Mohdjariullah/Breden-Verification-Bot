@@ -8,6 +8,16 @@ import json as pyjson
 
 UNVERIFIED_FILE = 'unverified_users.json'
 
+OWNER_USER_IDS = {890323443252351046, 879714530769391686}
+GUILD_ID = int(os.getenv('GUILD_ID', 0))
+
+def is_authorized_guild_or_owner(interaction):
+    if interaction.guild and interaction.guild.id == GUILD_ID:
+        return True
+    if interaction.user.id in OWNER_USER_IDS:
+        return True
+    return False
+
 def get_env_role_id(var_name):
     env_value = os.getenv(var_name)
     if env_value is None:
@@ -28,6 +38,10 @@ def save_unverified(data):
 @app_commands.command(name="mass_verify_unverified", description="Mass-verify all users with the Unverified role and send a JSON report to logs.")
 @app_commands.default_permissions(administrator=True)
 async def mass_verify_unverified(interaction: discord.Interaction):
+    if not is_authorized_guild_or_owner(interaction):
+        return await interaction.response.send_message(
+            "❌ You are not authorized to use this command.", ephemeral=True
+        )
     if not interaction.guild:
         return await interaction.response.send_message("❌ This command can only be used in a server!", ephemeral=True)
     if not isinstance(interaction.user, discord.Member) or not interaction.user.guild_permissions.administrator:
